@@ -1,0 +1,23 @@
+services:
+  brain-db:
+    image: timescale/timescaledb-ha:pg16
+    container_name: brain-db
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:5433:5432"
+    environment:
+      POSTGRES_USER: brain
+      POSTGRES_PASSWORD: brain_local_only
+      POSTGRES_DB: zeresh_brain
+    volumes:
+      - brain-data:/home/postgres/pgdata/data
+      - ./init:/docker-entrypoint-initdb.d
+    networks:
+      - frontend
+
+volumes:
+  brain-data:
+
+networks:
+  frontend:
+    external: true
