@@ -1,3 +1,4 @@
 #!/bin/bash
 SCRIPT_DIR="$(cd "$(dirname "$(readlink -f "$0")")" && pwd)"
+[ -f "$SCRIPT_DIR/.env" ] && set -a && . "$SCRIPT_DIR/.env" && set +a
 exec "$SCRIPT_DIR/.venv/bin/python3" "$SCRIPT_DIR/brain-cli.py" "$@"

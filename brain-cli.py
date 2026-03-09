@@ -6,6 +6,8 @@ import sys
 import uuid
 from datetime import datetime, timedelta, timezone
 
+import os
+
 import click
 import psycopg2
 import psycopg2.extras
@@ -15,13 +17,13 @@ import requests
 psycopg2.extras.register_uuid()
 
 DB_DEFAULTS = {
-    "host": "127.0.0.1",
-    "port": 5433,
-    "user": "brain",
-    "password": "brain_local_only",
+    "host": os.environ.get("BRAIN_DB_HOST", "127.0.0.1"),
+    "port": int(os.environ.get("BRAIN_DB_PORT", "5433")),
+    "user": os.environ.get("BRAIN_DB_USER", "brain"),
+    "password": os.environ.get("BRAIN_DB_PASSWORD", "brain_local_only"),
 }
 
-GEMINI_API_KEY = "AIzaSyAYkIwuj_GbD1Vx63hkWT0jleiXAXJTuSQ"
+GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
 GEMINI_EMBED_URL = (
     "https://generativelanguage.googleapis.com/v1beta/models/"
     f"gemini-embedding-001:embedContent?key={GEMINI_API_KEY}"
