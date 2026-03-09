@@ -321,7 +321,7 @@ def search(ctx, query, kind, project, since, limit):
 
     if emb:
         emb_str = "[" + ",".join(str(x) for x in emb) + "]"
-        params_q = params + [emb_str, query, limit]
+        params_q = [emb_str, query] + params + [limit]
         cur.execute(
             f"""
             SELECT *,
@@ -338,7 +338,7 @@ def search(ctx, query, kind, project, since, limit):
         )
     else:
         # Fallback: keyword only
-        params_q = params + [query, query, limit]
+        params_q = [query] + params + [query, limit]
         cur.execute(
             f"""
             SELECT *,

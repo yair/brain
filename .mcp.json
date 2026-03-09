@@ -1,8 +1,7 @@
 {
   "mcpServers": {
     "brain": {
-      "command": "python3",
-      "args": ["/home/oc/projects/zeresh-brain/brain-mcp.py"]
+      "command": "brain-mcp"
     }
   }
 }
