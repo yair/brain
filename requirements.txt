@@ -1,0 +1,10 @@
+# brain-cli dependencies
+click>=8.0
+psycopg2-binary>=2.9
+requests>=2.28
+
+# brain-mcp dependencies
+mcp>=1.26
+
+# Gemini embeddings (used by brain-cli)
+# API key via GEMINI_API_KEY env var

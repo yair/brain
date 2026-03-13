@@ -1,13 +1,25 @@
 #!/usr/bin/env python3
-"""brain-mcp — MCP server wrapping the brain CLI for Claude Code."""
+"""brain-mcp — MCP server wrapping the brain CLI for Claude Code.
+
+Runs in two modes:
+  - stdio (default): for local Claude Code via ~/.mcp.json {"command": ...}
+  - sse:  persistent HTTP server for remote/resilient connections
+
+The brain CLI must be on PATH. It connects to the brain DB using
+BRAIN_DB_HOST / BRAIN_DB_PORT env vars (defaults: 127.0.0.1:5433).
+"""
 
 import json
+import os
 import subprocess
 from mcp.server.fastmcp import FastMCP
 
-mcp = FastMCP("brain")
+MCP_PORT = int(os.environ.get("BRAIN_MCP_PORT", "8787"))
+mcp = FastMCP("brain", port=MCP_PORT)
 
-BRAIN = "brain"
+# Resolve brain CLI path: prefer BRAIN_CLI env, then script dir, then PATH
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+BRAIN = os.environ.get("BRAIN_CLI", os.path.join(SCRIPT_DIR, "brain"))
 
 
 def _run(args: list[str]) -> dict | list | str:
@@ -200,4 +212,6 @@ def brain_forget(entry_id: str) -> str:
 
 
 if __name__ == "__main__":
-    mcp.run(transport="stdio")
+    import sys
+    transport = sys.argv[1] if len(sys.argv) > 1 else "stdio"
+    mcp.run(transport=transport)
