@@ -1,7 +1,7 @@
 {
   "mcpServers": {
     "brain": {
-      "command": "./brain-mcp"
+      "command": "brain-mcp"
     }
   }
 }
