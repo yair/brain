@@ -1,147 +1,116 @@
-# brain-cli — Specification for Claude Code
+# brain-cli — Specification
 
 ## What to Build
 
-A Python CLI tool (`brain-cli.py`) that provides read/write access to the zeresh-brain PostgreSQL database. This is the shared backend for all AI agents in the system.
-
-## Installation Target
-
-- Single file: `/home/oc/projects/zeresh-brain/brain-cli.py`
-- Symlink to: `/home/oc/.local/bin/brain` (create dir if needed, it's in PATH)
-- Dependencies (already installed): `psycopg2-binary`, `click`, `requests`
+A Python CLI tool (`brain-cli.py`) that provides read/write access to the
+brain PostgreSQL database. This is the shared memory backend for AI agents.
 
 ## Database Connection
 
-- Host: `127.0.0.1`
-- Port: `5433`
-- User: `brain`
-- Password: `brain_local_only`
-- Database: `zeresh_brain` (default, `--db` flag to switch to e.g. `fay_brain`)
+Connection via environment variables (see `.env.example`):
+- `BRAIN_DB_HOST` (default: 127.0.0.1)
+- `BRAIN_DB_PORT` (default: 5432)
+- `BRAIN_DB_USER` (default: brain)
+- `BRAIN_DB_PASSWORD`
+- `BRAIN_DB_NAME` (default: brain)
 
 Use `psycopg2` (sync). No need for async.
 
 ## Existing Schema
 
-The database already exists with data. Do NOT create or modify tables. See PLAN.md for full schema, but the key tables:
+The database already exists with data. Do NOT create or modify tables.
+See `docker/init/002-schema.sql` for the full schema. Key tables:
 
-- `entries` — decisions, facts, insights, todos, observations (14 rows exist)
-- `entities` — people, projects, tools (12 rows exist)
-- `events` — calendar items (2 rows exist)
-- `location` — GPS/presence data (empty)
+- `entries` — decisions, facts, insights, todos, observations
+- `entities` — people, projects, tools
+- `events` — calendar items
+- `location` — GPS/presence data
+- `retrievals` — search result sets (for positional boosting)
+- `access_log` — boost/citation tracking
 
-Important columns on `entries`:
-- `id` (UUID), `kind` (text), `source` (text), `title` (text), `body` (text)
-- `tags` (text[]), `project` (text), `entity_refs` (text[])
-- `embedding` (vector(768)), `tsv` (tsvector)
-- `status` (text), `confidence` (float), `superseded_by` (UUID), `expires_at` (timestamptz)
-
-## Commands to Implement
+## Commands
 
 ### Read Commands
 
 ```bash
-brain search "what is jay working on"        # Hybrid semantic + keyword search
-brain search "handwave" --kind decision       # With filters
-brain search "todo" --project abelard --since "3 days ago"
+brain search "query"                          # Hybrid semantic + keyword search
+brain search "topic" --kind decision          # With filters
+brain search "todo" --project myproj --since "3 days ago"
 
 brain recent                                  # Last 10 entries
-brain recent --kind todo --status open        # Open TODOs
-brain recent --project handwave --limit 5     # Project-scoped
-brain recent --kind decision --since "1 week ago"
+brain recent --kind todo --status active      # Open TODOs
+brain recent --project myproj --limit 5       # Project-scoped
 
-brain get <id>                                # Get single entry by UUID
-brain entity <slug>                           # Get entity (e.g., "brain entity jay")
+brain get <id>                                # Single entry by UUID
+brain entity <slug>                           # Entity by slug
 brain entities                                # List all entities
 
-brain events                                  # Upcoming events (next 7 days default)
+brain events                                  # Upcoming events (7 days)
 brain events --from today --to "next week"
 
-brain todos                                   # Alias: brain recent --kind todo --status open
-brain todos --project handwave
+brain todos                                   # Open TODOs
+brain todos --project myproj
 
-brain where-is-jay                            # Latest location entry
+brain where                                   # Latest location
 
-brain context <project>                       # Dump: recent decisions + todos + entities for a project
+brain context <project>                       # Decisions + todos + entities
 ```
 
 ### Write Commands
 
 ```bash
-brain remember --kind decision --title "AGC approach" --body "Zone-weighted ROI..." --project handwave --tags handwave,camera
-brain remember --kind todo --title "Fix backup script" --body "Add fay_brain" --status open
-brain remember --kind fact --title "Jay's birthday" --body "February 21, 1975"
-brain remember --kind observation --title "Email from Art" --body "Replied with answers" --source junior
+brain remember --kind decision --title "Approach X" --body "Details..." --project myproj --tags tag1,tag2
+brain remember --kind todo --title "Fix backup" --body "Add new DB" --status active
 
-brain update <id> --status done               # Mark TODO done
-brain update <id> --body "Updated content"    # Update body
-brain update <id> --confidence 0.5            # Lower confidence
+brain update <id> --status done
+brain update <id> --body "Updated content"
 
-brain supersede <old-id> --title "New approach" --body "..."  # Replace entry
+brain supersede <old-id> --title "New approach" --body "..."
 
-brain forget <id>                             # Soft delete (set expires_at to now)
+brain forget <id>                             # Soft delete
 
-brain log-location --lat 41.3275 --lon 19.8187 --label "home" --source manual
-brain add-event --title "HandWave standup" --starts-at "2026-03-10 09:00" --attendees jay,matiss
+brain log-location --lat 41.33 --lon 19.82 --label "office"
+brain add-event --title "Standup" --starts-at "2026-03-10 09:00"
 ```
 
 ### Utility Commands
 
 ```bash
-brain stats                                   # Count of entries by kind, entities, events
-brain embed <id>                              # Generate/update embedding for a single entry
-brain embed --all --missing                   # Generate embeddings for all entries missing them
+brain stats                                   # Entry counts
+brain embed <id>                              # Generate/update embedding
+brain embed --all --missing                   # Backfill embeddings
+brain boost --retrieval <rid> 1 3 5           # Boost useful search results
+brain boost-history                           # Most-boosted entries
 ```
 
 ## Semantic Search (Embeddings)
 
-Use the **Gemini text-embedding-004** API for embeddings:
-- Endpoint: `https://generativelanguage.googleapis.com/v1beta/models/text-embedding-004:embedContent`
-- API key: `AIzaSyAYkIwuj_GbD1Vx63hkWT0jleiXAXJTuSQ`
-- Dimension: 768
+Uses **Gemini gemini-embedding-001** API for 768-dim embeddings:
 
 For `brain search`:
 1. Generate embedding for the query text
-2. Run hybrid search: combine vector similarity (`embedding <=> query_embedding`) with full-text (`tsv @@ plainto_tsquery(query)`)
-3. Rank by weighted combination (vector 0.7, FTS 0.3)
-4. Apply any filters (kind, project, tags, since/until)
-5. Return top-K results (default 10)
+2. Hybrid ranking: 70% vector similarity + 30% full-text match + 5% boost score
+3. Apply filters (kind, project, since)
+4. Return top-K results (default 10) with retrieval ID
 
 For `brain remember`:
 - Auto-generate embedding from `title + " " + body` on write
-- Also auto-generate `tsv` (the DB may have a trigger for this — check, if not, set it manually)
+- `tsv` is a generated column (auto-updated by Postgres)
 
 ## Output Format
 
-- Default: human-readable (good terminal output with colors if tty)
-- `--json` flag: JSON output (for programmatic use by agents)
-- `--quiet` flag: minimal output (just IDs for writes, just titles for reads)
+- Default: human-readable (colored terminal output)
+- `--json`: structured JSON (for programmatic use by agents)
+- `--quiet`: minimal output (IDs for writes, titles for reads)
 
 ## Source Field
 
-When `--source` is not specified, default to `"cli"`. Agents will pass their identity:
-- `brain remember --source zeresh ...`
+Default source: `"cli"`. Agents should identify themselves:
 - `brain remember --source claude-code ...`
-- `brain remember --source junior ...`
+- `brain remember --source my-agent ...`
 
 ## Error Handling
 
 - DB connection errors: clear message, exit 1
-- Embedding API errors: warn but still write the entry (embedding can be added later with `brain embed`)
-- Invalid filters: show usage help, exit 2
-
-## Testing
-
-After building, test with:
-1. `brain stats` — should show existing data counts
-2. `brain recent` — should list existing entries
-3. `brain search "handwave"` — should find relevant entries
-4. `brain remember --kind test --title "Test entry" --body "Testing brain-cli" --tags test`
-5. `brain search "test entry"` — should find it
-6. `brain forget <id-from-step-4>` — clean up
-
-## Code Style
-
-- Single file, well-organized with click command groups
-- Type hints
-- Docstrings on commands
-- No over-engineering — this is a CLI tool, not a framework
+- Embedding API errors: warn but still write (embedding can be added later)
+- Invalid filters: usage help, exit 2

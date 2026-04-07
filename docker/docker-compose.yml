@@ -4,20 +4,14 @@ services:
     container_name: brain-db
     restart: unless-stopped
     ports:
-      - "127.0.0.1:5433:5432"
+      - "${BRAIN_DB_BIND:-127.0.0.1}:${BRAIN_DB_PORT:-5432}:5432"
     environment:
-      POSTGRES_USER: brain
-      POSTGRES_PASSWORD: brain_local_only
-      POSTGRES_DB: zeresh_brain
+      POSTGRES_USER: ${BRAIN_DB_USER:-brain}
+      POSTGRES_PASSWORD: ${BRAIN_DB_PASSWORD:?Set BRAIN_DB_PASSWORD in .env}
+      POSTGRES_DB: ${BRAIN_DB_NAME:-brain}
     volumes:
       - brain-data:/home/postgres/pgdata/data
       - ./init:/docker-entrypoint-initdb.d
-    networks:
-      - frontend
 
 volumes:
   brain-data:
-
-networks:
-  frontend:
-    external: true

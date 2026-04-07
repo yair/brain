@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
-"""brain-mcp — MCP server wrapping the brain CLI for Claude Code.
+"""brain-mcp — MCP server wrapping the brain CLI.
 
 Runs in two modes:
-  - stdio (default): for local Claude Code via ~/.mcp.json {"command": ...}
+  - stdio (default): for local clients via .mcp.json {"command": ...}
   - sse:  persistent HTTP server for remote/resilient connections
 
 The brain CLI must be on PATH. It connects to the brain DB using
-BRAIN_DB_HOST / BRAIN_DB_PORT env vars (defaults: 127.0.0.1:5433).
+BRAIN_DB_HOST / BRAIN_DB_PORT env vars (see .env.example).
 """
 
 import atexit
@@ -145,9 +145,9 @@ def brain_todos(project: str = "") -> str:
 
 
 @mcp.tool()
-def brain_where_is_jay() -> str:
-    """Get Jay's latest known location."""
-    return json.dumps(_run(["where-is-jay"]))
+def brain_where() -> str:
+    """Get the latest known location."""
+    return json.dumps(_run(["where"]))
 
 
 @mcp.tool()

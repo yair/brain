@@ -6,7 +6,7 @@
 |-----------|-------------------------------------------|
 | `--json`  | JSON output (always use from AI sessions) |
 | `--quiet` | Minimal output (IDs/titles only)          |
-| `--db`    | Database name (default: zeresh_brain)     |
+| `--db`    | Database name (default from `BRAIN_DB_NAME` or `brain`) |
 
 ## Search
 
@@ -73,7 +73,7 @@ brain --json entity <slug>
 ```
 
 Entities are people, projects, tools, clients, or places. Keyed by slug
-(e.g., "jay", "handwave", "zhizi").
+(e.g., `alice`, `my-project`, `postgres`).
 
 Entity metadata is stored as JSONB — can contain arbitrary key-value pairs
 like email, timezone, role, etc.
@@ -86,10 +86,10 @@ brain --json events [--from DATE] [--to DATE]
 
 Calendar events. Defaults to today through 7 days from now.
 
-## Where is Jay
+## Where (location)
 
 ```bash
-brain --json where-is-jay
+brain --json where
 ```
 
 Returns the latest entry from the location table.
@@ -113,7 +113,7 @@ brain --json remember \
   --source claude-code \
   [--project PROJECT] \
   [--tags "tag1,tag2,tag3"] \
-  [--entity-refs "jay,handwave"] \
+  [--entity-refs "alice,my-project"] \
   [--status active] \
   [--confidence 0.9]
 ```
@@ -125,7 +125,7 @@ on write (requires GEMINI_API_KEY).
 preference, debrief.
 
 **--source**: Always set to `claude-code` from Claude Code sessions.
-Other sources: cli, zeresh, junior, sonnet-worker.
+Other sources: cli, my-agent, worker, etc.
 
 **--status**: Default `active`. For TODOs, use active/done/blocked.
 
@@ -212,7 +212,7 @@ entries that were created without an API key.
 | Variable           | Default          | Purpose                    |
 |--------------------|------------------|----------------------------|
 | `BRAIN_DB_HOST`    | 127.0.0.1        | Database host              |
-| `BRAIN_DB_PORT`    | 5433             | Database port              |
+| `BRAIN_DB_PORT`    | 5432             | Database port              |
 | `BRAIN_DB_USER`    | brain            | Database user              |
-| `BRAIN_DB_PASSWORD` | brain_local_only | Database password          |
+| `BRAIN_DB_PASSWORD` | (none)           | Database password          |
 | `GEMINI_API_KEY`   | (none)           | For embedding generation   |

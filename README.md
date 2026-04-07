@@ -1,125 +1,132 @@
-# Zeresh Brain
+# Brain
 
-A shared, structured memory layer for Jay's AI ecosystem. Every AI session
-(Claude Code, OpenClaw agents, briefings, triage) reads and writes to one
-Postgres database with vector embeddings, so decisions, facts, and context
-survive across sessions and projects.
+A persistent, structured memory layer for AI agents. Brain gives every
+AI session — Claude Code, custom agents, cron jobs — shared
+read/write access to a single Postgres database with vector embeddings,
+full-text search, and time-decay ranking.
 
-## Why
-
-Without a shared brain, each new AI session starts nearly blind. Decisions
-made in one project are invisible to another. TODOs drift. Context is lost.
-The brain fixes this: a single queryable database that any session can search,
-write to, and learn from.
+Any session can search what another session decided, stored, or learned.
+Decisions survive session boundaries. TODOs stay current. Context is
+never lost.
 
 ## Architecture
 
 ```
-                      zeresh-brain
-                  (Postgres 16 + pgvector)
-                  hosted on bakkies (albanialink.com)
-                          |
-               SSH tunnel (port 5433)
-                          |
-        +---------+-------+-------+-----------+
-        |         |               |           |
-    Claude     OpenClaw        Briefing    Triage
-    Code       agents          crons       (junior)
-   (brain      (brain          (brain      (brain
-    CLI)        CLI)            CLI)        CLI)
+                     brain
+               (Postgres + pgvector)
+                       |
+          CLI / MCP / Claude Code skill
+                       |
+        +-------+------+------+---------+
+        |       |             |         |
+    Claude   Custom       Briefing   Triage
+    Code     agents       crons      bots
 ```
 
-All access goes through the `brain` CLI. No MCP server needed — each
-invocation connects directly to the DB through the SSH tunnel, does its
-work, and exits. Stateless, resilient, zero infrastructure.
+Three access methods, all equivalent:
 
-## Tables
+| Method | Best for | How |
+|--------|----------|-----|
+| **CLI** (`brain`) | Scripts, Claude Code, any shell | `brain --json search "query"` |
+| **MCP server** (`brain-mcp`) | MCP-compatible clients | stdio or SSE transport |
+| **Claude Code skill** (`/brain`) | Claude Code sessions | Install `skill/` globally |
 
-| Table      | Purpose                                          |
-|------------|--------------------------------------------------|
-| `entries`  | Decisions, facts, TODOs, insights, observations, preferences, debriefs |
-| `entities` | People, projects, tools, clients (keyed by slug) |
-| `events`   | Calendar events, meetings, deadlines             |
-| `location` | GPS/presence data (Jay's location)               |
-| `access_log` | Boost/citation tracking for search ranking     |
-| `retrievals` | Search result sets (for positional boosting)   |
+The CLI is recommended for Claude Code — it's stateless (no connection to
+drop), trivially resilient, and works everywhere.
 
-### entries schema
+## Quick start
 
-| Column         | Type          | Notes                                      |
-|----------------|---------------|--------------------------------------------|
-| `id`           | UUID          | Primary key                                |
-| `kind`         | text          | decision, fact, todo, insight, observation, preference, debrief |
-| `source`       | text          | Who wrote it: claude-code, zeresh, cli, junior, ... |
-| `title`        | text          | Short, searchable summary                  |
-| `body`         | text          | Full content                               |
-| `tags`         | text[]        | Freeform tags for filtering                |
-| `project`      | text          | Project slug (handwave, zhizi, abelard, ...) |
-| `entity_refs`  | text[]        | Referenced entity slugs                    |
-| `embedding`    | vector(768)   | Gemini embedding for semantic search       |
-| `tsv`          | tsvector      | Full-text search vector (auto-generated)   |
-| `status`       | text          | active, done, blocked, ...                 |
-| `confidence`   | float         | 0-1, can be updated over time              |
-| `superseded_by`| UUID          | Points to replacement entry                |
-| `expires_at`   | timestamptz   | Soft-delete / TTL                          |
-
-## Installation
-
-### Prerequisites
-
-- Python 3.11+
-- SSH tunnel to bakkies forwarding port 5433 (brain DB)
-- Gemini API key (for embeddings, optional but recommended)
-
-### Setup
+### 1. Start the database
 
 ```bash
-cd ~/w/zeresh-brain
+cp .env.example .env
+# Edit .env: set BRAIN_DB_PASSWORD and GEMINI_API_KEY
+
+cd docker
+docker compose up -d
+```
+
+This starts Postgres 16 with pgvector and TimescaleDB, initializes the
+schema, and binds to localhost.
+
+### 2. Install the CLI
+
+```bash
 python3 -m venv .venv
 .venv/bin/pip install -r requirements.txt
 
-# Create wrapper symlinks
+mkdir -p ~/.local/bin
 ln -sf "$(pwd)/brain" ~/.local/bin/brain
-ln -sf "$(pwd)/brain-mcp" ~/.local/bin/brain-mcp  # optional, for MCP server mode
-
-# Set up env (in ~/.local/bin/.env or export directly)
-export GEMINI_API_KEY="your-key-here"
 ```
 
-### Verify
+### 3. Verify
 
 ```bash
-brain stats           # should show entry counts
-brain recent          # should list recent entries
-brain search "test"   # should return results
+brain stats
+brain remember --kind fact --title "Test entry" --body "Brain is working"
+brain search "test"
+brain forget <id-from-above>
 ```
 
-### Claude Code integration
-
-Install the brain skill globally:
+### 4. (Optional) Claude Code skill
 
 ```bash
-mkdir -p ~/.claude/skills/brain
-# Copy or symlink SKILL.md from this repo
-cp skill/SKILL.md ~/.claude/skills/brain/SKILL.md
+ln -sf "$(pwd)/skill" ~/.claude/skills/brain
 ```
 
-Claude Code sessions can then use `/brain` or call `brain` via Bash
-directly. No MCP server, no `.mcp.json`, no dropped connections.
+The skill teaches Claude Code to use the brain CLI automatically — when
+to search, when to store, how to boost results.
 
-## CLI Reference
+### 5. (Optional) MCP server
 
-### Global flags
+For MCP-compatible clients that don't support CLI tools:
 
-| Flag      | Effect                           |
-|-----------|----------------------------------|
-| `--json`  | JSON output (use from AI agents) |
-| `--quiet` | Minimal output (IDs/titles only) |
-| `--db`    | Database name (default: zeresh_brain) |
+```bash
+# stdio mode (Claude Code, Cursor, etc.)
+ln -sf "$(pwd)/brain-mcp" ~/.local/bin/brain-mcp
+```
 
-### Commands
+Add to your project's `.mcp.json`:
+```json
+{ "mcpServers": { "brain": { "command": "brain-mcp" } } }
+```
 
-**Search & Read:**
+## Data model
+
+### entries — the core table
+
+Every piece of knowledge is an entry with a kind:
+
+| Kind | Purpose |
+|------|---------|
+| `decision` | A choice made during work, with reasoning |
+| `fact` | Something true and useful |
+| `todo` | A persistent task (status: active/done/blocked) |
+| `insight` | A realization or pattern |
+| `observation` | Something seen or reported |
+| `preference` | How someone likes things done |
+| `debrief` | Post-session or post-incident summary |
+
+Entries have: title, body, tags, project, entity_refs, source,
+confidence, embedding (768-dim vector), full-text search vector,
+and lifecycle fields (superseded_by, expires_at, status).
+
+### entities — people, projects, tools
+
+Keyed by slug (e.g., `alice`, `my-project`, `postgres`). Stores
+name, kind, and arbitrary metadata as JSONB.
+
+### events — calendar
+
+Title, start/end times, location, attendees, notes.
+
+### location — presence tracking
+
+GPS coordinates with source, accuracy, and label.
+
+## CLI reference
+
+### Reading
 
 ```bash
 brain search "query" [--kind K] [--project P] [--since S] [--limit N]
@@ -130,77 +137,77 @@ brain todos [--project P]
 brain entities
 brain entity <slug>
 brain events [--from D] [--to D]
-brain where-is-jay
+brain where                    # latest known location
 brain stats
-brain boost-history [entry-id] [--limit N]
 ```
 
-**Write:**
+### Writing
 
 ```bash
-brain remember --kind K --title T --body B [--source S] [--project P] [--tags T] [--entity-refs E] [--status S] [--confidence C]
-brain update <entry-id> [--status S] [--body B] [--title T] [--confidence C]
-brain supersede <old-id> --title T --body B [--source S]
-brain forget <entry-id>
-brain boost [--retrieval R] <ids-or-positions...> [--context C] [--source S]
+brain remember --kind K --title T --body B [--source S] [--project P] [--tags T] [--entity-refs E]
+brain update <id> [--status S] [--body B] [--title T] [--confidence C]
+brain supersede <old-id> --title T --body B
+brain forget <id>
+brain boost [--retrieval R] <ids-or-positions...> [--source S] [--context C]
 ```
 
-**Utility:**
+### Global flags
 
-```bash
-brain log-location --lat L --lon L [--label L] [--source S]
-brain add-event --title T --starts-at D [--ends-at D] [--location L] [--attendees A] [--notes N]
-brain embed <entry-id>
-brain embed --all [--missing]
-```
+| Flag | Effect |
+|------|--------|
+| `--json` | Structured JSON output (use from AI agents) |
+| `--quiet` | Minimal output (IDs/titles only) |
+| `--db` | Database name (default from `BRAIN_DB_NAME` env var) |
 
-### Search details
+## Search ranking
 
-`brain search` does hybrid ranking:
+`brain search` uses hybrid ranking:
 - **70% semantic similarity** via Gemini embeddings (pgvector cosine distance)
-- **30% keyword match** via Postgres full-text search (tsvector)
+- **30% keyword match** via Postgres full-text search
 - **+5% boost score** from access_log (time-decayed over 30 days)
 
-Each search records a retrieval ID. Use `brain boost --retrieval <rid> <positions>`
-to boost useful results and improve future ranking.
+Embeddings are generated on write via the Gemini API. Each search records
+a retrieval ID for positional boosting.
 
-## Connection details
+## Remote access
 
-| Setting    | Default                | Env var            |
-|------------|------------------------|--------------------|
-| DB host    | 127.0.0.1              | `BRAIN_DB_HOST`    |
-| DB port    | 5433                   | `BRAIN_DB_PORT`    |
-| DB user    | brain                  | `BRAIN_DB_USER`    |
-| DB password| brain_local_only       | `BRAIN_DB_PASSWORD`|
-| DB name    | zeresh_brain           | `--db` flag        |
-| Gemini key | (none)                 | `GEMINI_API_KEY`   |
+If the database runs on a remote server, use an SSH tunnel:
 
-The DB is hosted on bakkies (albanialink.com) and accessed via SSH tunnel.
-On zhizi, the tunnel is provided by zeresh's `openclaw-tunnel` systemd
-service, which forwards ports 5433 (brain DB), 18790 (OpenClaw), and
-reverse-forwards 2222 (SSH back to zhizi).
+```bash
+ssh -L 5432:127.0.0.1:5432 user@your-server -N &
+```
+
+Then set `BRAIN_DB_HOST=127.0.0.1` in `.env`. The CLI connects to
+whatever host/port is configured — local or tunneled.
+
+## Configuration
+
+All configuration is via environment variables (loaded from `.env`
+by the wrapper scripts):
+
+| Variable | Default | Purpose |
+|----------|---------|---------|
+| `BRAIN_DB_HOST` | 127.0.0.1 | Database host |
+| `BRAIN_DB_PORT` | 5432 | Database port |
+| `BRAIN_DB_USER` | brain | Database user |
+| `BRAIN_DB_PASSWORD` | (none) | Database password |
+| `BRAIN_DB_NAME` | brain | Database name |
+| `GEMINI_API_KEY` | (none) | For embedding generation |
+| `BRAIN_MCP_PORT` | 8787 | MCP server port (SSE mode) |
 
 ## Files
 
-| File            | Purpose                                    |
-|-----------------|--------------------------------------------|
-| `brain`         | Shell wrapper — activates venv, runs CLI   |
-| `brain-cli.py`  | The CLI implementation (click-based)       |
-| `brain-mcp`     | Shell wrapper for MCP server mode          |
-| `brain-mcp.py`  | MCP server (stdio/SSE) — optional legacy   |
-| `requirements.txt` | Python dependencies                     |
-| `docker/`       | Docker compose for the Postgres instance   |
-| `docs/`         | Specs, plans, setup guides                 |
+| File | Purpose |
+|------|---------|
+| `brain` | Shell wrapper — activates venv, runs CLI |
+| `brain-cli.py` | CLI implementation (click-based) |
+| `brain-mcp` | Shell wrapper for MCP server |
+| `brain-mcp.py` | MCP server (stdio/SSE transport) |
+| `skill/` | Claude Code skill (symlink to `~/.claude/skills/brain`) |
+| `docker/` | Docker Compose + schema init scripts |
+| `requirements.txt` | Python dependencies |
+| `docs/` | Design documents and setup guides |
 
-## Design decisions
+## License
 
-- **CLI over MCP**: The brain was originally exposed via an MCP server, but
-  MCP stdio connections drop during long Claude Code sessions (context
-  compression, memory pressure). The CLI is stateless and trivially
-  resilient — every call is independent.
-- **Gemini embeddings**: Cheap (~$0.01/month), good quality, 768 dimensions.
-  Embeddings are generated on write and on-demand via `brain embed`.
-- **Soft deletes**: `brain forget` sets `expires_at` rather than deleting
-  rows. All queries filter on expiry automatically.
-- **Boost system**: Search results can be boosted to improve future ranking.
-  Boosts decay over 30 days to prevent stale entries from dominating.
+MIT

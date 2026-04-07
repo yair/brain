@@ -1,4 +1,4 @@
--- Zeresh Brain Schema
+-- Brain Schema
 
 -- Core memory entries
 CREATE TABLE entries (
@@ -8,7 +8,7 @@ CREATE TABLE entries (
     
     -- Classification
     kind        TEXT NOT NULL,       -- decision, insight, fact, debrief, todo, observation, preference
-    source      TEXT NOT NULL,       -- zeresh, jay, claude-code, sonnet-worker, triage, fay-agent
+    source      TEXT NOT NULL,       -- who wrote it: claude-code, cli, agent-name, etc.
     session_id  TEXT,
     
     -- Content
@@ -92,6 +92,28 @@ CREATE TABLE telemetry (
 );
 
 SELECT create_hypertable('telemetry', 'timestamp');
+
+-- Search retrievals (for positional boosting)
+CREATE TABLE retrievals (
+    id          UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    query       TEXT NOT NULL,
+    result_ids  UUID[] NOT NULL,
+    source      TEXT DEFAULT 'cli',
+    created_at  TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+-- Access/boost log (improves future search ranking)
+CREATE TABLE access_log (
+    id          UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    entry_id    UUID NOT NULL REFERENCES entries(id),
+    kind        TEXT NOT NULL DEFAULT 'boost',   -- boost, cited, acted_on
+    context     TEXT,
+    session_id  TEXT,
+    accessed_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE INDEX idx_access_log_entry ON access_log(entry_id);
+CREATE INDEX idx_access_log_accessed ON access_log(accessed_at DESC);
 
 -- Auto-update updated_at
 CREATE OR REPLACE FUNCTION update_updated_at()

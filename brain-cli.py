@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""brain-cli — CLI for the zeresh-brain shared memory database."""
+"""brain-cli — CLI for the brain shared memory database."""
 
 import json
 import sys
@@ -18,9 +18,9 @@ psycopg2.extras.register_uuid()
 
 DB_DEFAULTS = {
     "host": os.environ.get("BRAIN_DB_HOST", "127.0.0.1"),
-    "port": int(os.environ.get("BRAIN_DB_PORT", "5433")),
+    "port": int(os.environ.get("BRAIN_DB_PORT", "5432")),
     "user": os.environ.get("BRAIN_DB_USER", "brain"),
-    "password": os.environ.get("BRAIN_DB_PASSWORD", "brain_local_only"),
+    "password": os.environ.get("BRAIN_DB_PASSWORD", ""),
 }
 
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
@@ -188,12 +188,12 @@ def output_results(items: list, formatter, as_json: bool, quiet: bool):
 
 
 @click.group()
-@click.option("--db", default="zeresh_brain", help="Database name")
+@click.option("--db", default=os.environ.get("BRAIN_DB_NAME", "brain"), help="Database name")
 @click.option("--json", "as_json", is_flag=True, help="JSON output")
 @click.option("--quiet", is_flag=True, help="Minimal output")
 @click.pass_context
 def cli(ctx, db: str, as_json: bool, quiet: bool):
-    """brain — CLI for the zeresh-brain shared memory database."""
+    """brain — CLI for the brain shared memory database."""
     ctx.ensure_object(dict)
     ctx.obj["db"] = db
     ctx.obj["json"] = as_json
@@ -477,13 +477,13 @@ def todos(ctx, project):
     ctx.invoke(recent, kind="todo", status="active", project=project, since=None, limit=50)
 
 
-# ── where-is-jay ─────────────────────────────────────────────────────
+# ── where (location) ─────────────────────────────────────────────────
 
 
-@cli.command("where-is-jay")
+@cli.command("where")
 @click.pass_context
-def where_is_jay(ctx):
-    """Show Jay's latest location."""
+def where(ctx):
+    """Show the latest known location."""
     conn = get_conn(ctx.obj["db"])
     cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
     cur.execute("SELECT * FROM location ORDER BY timestamp DESC LIMIT 1")

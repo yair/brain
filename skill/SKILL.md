@@ -1,10 +1,10 @@
 ---
 name: brain
 description: >
-  Zeresh Brain — shared persistent memory across all AI sessions. Search,
+  Brain — shared persistent memory across all AI sessions. Search,
   store, and recall decisions, facts, TODOs, insights, observations,
   preferences, and debriefs. Look up entities (people, projects, tools),
-  check calendar events, or find Jay's location. Use this skill whenever
+  check calendar events, or find the latest location. Use this skill whenever
   the conversation involves cross-session knowledge, recalling past decisions,
   storing something for future sessions, project context, persistent TODOs,
   entity lookups, or anything that should survive beyond this conversation.
@@ -13,22 +13,21 @@ description: >
   projects, or past work — even if they don't mention "brain" explicitly.
 user-invocable: true
 allowed-tools: Bash Read
-argument-hint: "<command> [args] — e.g. 'search openclaw', 'recent --project zhizi', 'context zhizi'"
+argument-hint: "<command> [args] — e.g. 'search topic', 'recent --project myproj', 'context myproj'"
 ---
 
 # Brain CLI — Shared Memory for All Sessions
 
 The `brain` CLI is the single source of truth for persistent knowledge
-across Jay's AI ecosystem. Every Claude Code session, OpenClaw agent,
-briefing, and triage bot reads and writes to the same database. Anything
-worth knowing beyond this conversation belongs in the brain.
+across all AI sessions. Every Claude Code session, agent, briefing, and
+bot reads and writes to the same database. Anything worth knowing beyond
+this conversation belongs in the brain.
 
 ## How it works
 
-The brain is a Postgres database (with pgvector for semantic search)
-hosted remotely and accessed locally via SSH tunnel on port 5433. The
-`brain` CLI connects directly — no server process, no MCP, no connection
-to drop. Each invocation is stateless and independent.
+The brain is a Postgres database (with pgvector for semantic search).
+The `brain` CLI connects directly — no server process, no MCP, no
+connection to drop. Each invocation is stateless and independent.
 
 ## Core workflow
 
@@ -43,7 +42,7 @@ activity for the project. It replaces reading MEMORY.md for project context.
 ```bash
 brain --json remember --kind decision --title "Use Rust for parser" \
   --body "Python was too slow for the 50k-line files. Rust parser runs in <1s." \
-  --source claude-code --project handwave --tags "parser,performance"
+  --source claude-code --project my-project --tags "parser,performance"
 ```
 Decisions, facts, insights, preferences — if it's non-obvious and matters
 beyond this conversation, remember it. Future sessions will find it via
@@ -76,7 +75,7 @@ always pass `--json` so output is structured and parseable.
 | All entities | `brain --json entities` |
 | One entity | `brain --json entity <slug>` |
 | Events | `brain --json events [--from D] [--to D]` |
-| Jay's location | `brain --json where-is-jay` |
+| Latest location | `brain --json where` |
 | Stats overview | `brain --json stats` |
 | Remember | `brain --json remember --kind K --title T --body B --source claude-code [--project P] [--tags T]` |
 | Update | `brain --json update <id> [--status S] [--body B] [--title T]` |
@@ -112,13 +111,12 @@ Search before creating — if a relevant entry already exists, `update` or
 
 ## Troubleshooting
 
-If brain commands fail with "cannot connect to database", the SSH tunnel
-is probably down. Check it:
+If brain commands fail with "cannot connect to database", the database
+is unreachable. If it runs on a remote server via SSH tunnel, check the
+tunnel is up:
 ```bash
-ps aux | grep 5433
+ss -tlnp | grep $BRAIN_DB_PORT
 ```
-The tunnel runs under user `zeresh` via the `openclaw-tunnel` systemd
-service. It forwards port 5433 from bakkies (albanialink.com).
 
 ## Handling /brain invocations
 
