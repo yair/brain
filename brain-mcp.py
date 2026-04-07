@@ -9,10 +9,26 @@ The brain CLI must be on PATH. It connects to the brain DB using
 BRAIN_DB_HOST / BRAIN_DB_PORT env vars (defaults: 127.0.0.1:5433).
 """
 
+import atexit
 import json
+import logging
 import os
+import signal
 import subprocess
+import sys
 from mcp.server.fastmcp import FastMCP
+
+# Diagnostic logging — helps distinguish OOM kills from client disconnects
+_log = logging.getLogger("brain-mcp")
+_log_handler = logging.FileHandler("/tmp/brain-mcp.log")
+_log_handler.setFormatter(logging.Formatter("%(asctime)s [%(process)d] %(message)s"))
+_log.addHandler(_log_handler)
+_log.setLevel(logging.INFO)
+
+_log.info("brain-mcp starting (pid=%d, argv=%s)", os.getpid(), sys.argv)
+atexit.register(lambda: _log.info("brain-mcp exiting normally via atexit"))
+for _sig in (signal.SIGTERM, signal.SIGINT):
+    signal.signal(_sig, lambda s, f: (_log.info("brain-mcp caught signal %s", s), sys.exit(0)))  # noqa: E501
 
 MCP_PORT = int(os.environ.get("BRAIN_MCP_PORT", "8787"))
 mcp = FastMCP("brain", port=MCP_PORT)
@@ -25,9 +41,15 @@ BRAIN = os.environ.get("BRAIN_CLI", os.path.join(SCRIPT_DIR, "brain"))
 def _run(args: list[str]) -> dict | list | str:
     """Run brain --json <args> and return parsed JSON."""
     cmd = [BRAIN, "--json"] + args
-    result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+    _log.info("tool call: %s", " ".join(args))
+    try:
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+    except subprocess.TimeoutExpired:
+        _log.warning("brain subprocess timed out: %s", " ".join(args))
+        raise RuntimeError(f"brain command timed out after 30s: {' '.join(args)}")
     if result.returncode != 0:
         err = result.stderr.strip() or result.stdout.strip() or f"brain exited {result.returncode}"
+        _log.warning("brain subprocess failed (rc=%d): %s", result.returncode, err[:200])
         raise RuntimeError(err)
     out = result.stdout.strip()
     if not out:
