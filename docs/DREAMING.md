@@ -258,16 +258,24 @@ entries from transcripts). Optional notifications.
 
 ## Integration Points
 
-### Brain MCP Server
-- Modify `brain_search` to log to `recall_log` (Phase 0)
-- Add `brain_dream_status` tool (check last run, pending candidates)
-- Add `brain_dream_insights` tool (surface recent dream insights)
+### Brain MCP Server + CLI + Skill
+- Modify `brain_search` in ALL access points to log to `recall_log` (Phase 0)
+- Add `brain dream status` CLI command (check last run, pending candidates)
+- Add `brain dream insights` CLI command (surface recent dream insights)
+- Add MCP tools for the same
 
-### Vagus (Future)
-- Dreaming cycle is a Vagus-scheduled task
-- Vagus decides when to run based on activity level (no point dreaming if
-  nothing happened today)
-- Vagus routes dream notifications to the right recipient
+### Session Collector (Pre-Dreaming Task)
+- Runs before Light phase, collects sessions from all sources
+- OC sessions: `~/.openclaw/agents/*/sessions/*.jsonl`
+- Claude Code sessions: `~/.claude/projects/*/sessions/` (bakkies)
+- Remote sessions: via SSH from zhizi and any other nodes
+- Output: unified transcript staging area for Light phase ingestion
+- Must handle: dedup across sources, redaction, format normalization
+
+### Vagus / System Cron
+- Dreaming cycle runs daily at 3 AM via system cron
+- Session collection runs first (2:30 AM?), then dreaming phases
+- Notifications routed via alert_main (Telegram) and notify-session.sh
 
 ### OC Sessions
 - Session transcript ingestion as input to Light phase
@@ -278,45 +286,84 @@ entries from transcripts). Optional notifications.
 - `brain_forget` — used by Deep phase to expire stale entries
 - `brain_boost` — already tracks access patterns (extend for recall tracking)
 
-## Open Questions
+## Design Decisions (Resolved)
 
-1. **Model for LLM phases**: REM pattern recognition and transcript extraction
-   need an LLM. Which model? GLM-5.1 (good at analysis) or something cheaper?
-   The "expensive" budget in OC's config suggests they use the best available.
+1. **Model**: Opus via `claude -p` (non-interactive print mode). Configurable
+   but Opus is the primary — Mimo/GLM/OpenRouter models only as fallback.
+   They're not up to the analytical task (GLM acknowledged todo updates but
+   did nothing; Mimo couldn't find referenced emails).
 
-2. **Frequency**: Daily at 3 AM (like OC) or more/less often? Depends on
-   activity volume. Low-activity days shouldn't trigger a full cycle.
+2. **Frequency**: Daily at 3 AM. Even on quiet days — REM/Deep cycles can
+   still find value in existing accumulated signals without new input.
 
-3. **Cross-agent dreaming**: Should Fay's and David's recall patterns
-   influence Zeresh's consolidation? They have separate brain databases
-   but share some context.
+3. **Cross-agent dreaming**: No. Each agent's brain is independent.
 
-4. **Retroactive scoring**: When we first enable recall tracking, there's
-   no historical data. Should we backfill from `retrievals` table, or start
-   from zero and let signals accumulate naturally?
+4. **Retroactive scoring**: Yes, backfill from the `retrievals` table.
+   Also: do a one-time consolidation pass over ALL brain entries before
+   letting dreaming maintain ongoing. There are many contradicting and
+   stale entries that need cleaning first.
 
-5. **Human review**: How much should be automatic vs flagged for Jay?
-   The OC approach (3 hard gates + 30-day expiry) is conservative. We might
-   want different thresholds for different entry kinds (TODOs expire faster
-   than facts).
+5. **Thresholds**: Start with minRecallCount=5 and maxAgeDays=90.
+   The higher count and longer window should help process old entries
+   gradually rather than mass-expiring everything.
 
-6. **Dream diary format**: Should dream insights be brain entries
-   (kind: 'debrief') or a separate storage? Brain entries are searchable
-   and persistent. Separate storage keeps them from polluting search results.
+6. **Dream diary format**: Brain entries (kind: 'debrief', source: 'dreaming').
+   Not pollution — sometimes dream insights are the best search result.
 
-7. **Conflict with manual maintenance**: What happens when Jay manually
-   updates an entry that dreaming also wants to modify? Dreaming should
-   defer to manual changes (last-write-wins based on updated_at).
+7. **Conflict with manual edits**: If an entry was manually edited (by
+   Zeresh, Jay, Code, or anyone), its dreaming scores should be ZEROED.
+   It's effectively a new entry and needs to be reassessed from scratch.
+   Check `updated_at > created_at` AND `updated_at > last_dream_score_at`.
+
+## Additional Design Notes
+
+### LLM Access
+
+One-shot LLM calls via `claude -p` (Claude Code print mode). This gives us
+Opus without managing API keys or sessions. The command should be configurable
+— fallback to OpenRouter models if Opus isn't available. Do NOT use OC agents
+for dreaming LLM calls — they carry too much context overhead.
+
+### Session Collection
+
+Sessions need to be collected from MULTIPLE sources before dreaming:
+- OC sessions: `~/.openclaw/agents/*/sessions/*.jsonl`
+- Claude Code sessions on bakkies: `~/.claude/projects/*/sessions/`
+- Claude Code sessions on zhizi: collected via SSH/rsync
+- Other machines/users: configurable collection endpoints
+
+Session collection is a separate pre-dreaming task. Collected transcripts
+go to a staging area before Light phase ingestion.
+
+### Access Points
+
+Brain is accessed via:
+- **MCP server** (brain-mcp.py) — used by OC agents and Claude Code
+- **CLI** (brain-cli.py) — used by scripts, cron jobs, humans
+- **Skill** (brain skill in OC/Code) — wraps CLI for agent use
+
+All three need recall tracking (Phase 0). The MCP server is the most
+important since it handles the most searches, but CLI searches should
+also be logged.
 
 ## Implementation Order
 
-1. **Phase 0: Recall tracking** — modify brain MCP server, add recall_log
-   table. Zero user-facing changes. Start accumulating signal data.
+0. **Initial consolidation** — before any dreaming, do a one-time Opus-powered
+   review of all brain entries. Find contradictions, stale TODOs, duplicate
+   facts, outdated decisions. Clean the house before automating maintenance.
+   Backfill recall signals from the `retrievals` table.
 
-2. **Phase 1: Light Sleep** — build the signal aggregation pipeline.
+1. **Phase 0: Recall tracking** — modify brain MCP server, CLI, AND skill
+   to log to `recall_log`. All three access points must track. Zero
+   user-facing changes. Start accumulating signal data.
+
+2. **Session collector** — build the pre-dreaming task that gathers
+   transcripts from OC, Claude Code, and remote nodes.
+
+3. **Phase 1: Light Sleep** — build the signal aggregation pipeline.
    Read-only analysis of recall_log. Populates dream_candidates.
 
-3. **Phase 3: Deep Sleep (subset)** — start with just expiration:
+4. **Phase 3: Deep Sleep (subset)** — start with just expiration:
    entries never recalled in 30+ days get flagged. Low risk.
 
 4. **Phase 2: REM Sleep** — add pattern recognition. Requires LLM calls.
@@ -329,14 +376,26 @@ entries from transcripts). Optional notifications.
 
 ## References
 
-- OC CHANGELOG dreaming entries (2026.4.10-4.15)
-- https://dev.to/czmilo/openclaw-dreaming-guide-2026
-- `openclaw memory rem-harness --json` output
+- OC CHANGELOG: `~/.npm-global/lib/node_modules/openclaw/CHANGELOG.md` (grep for "dreaming")
+- OC dreaming guide: https://dev.to/czmilo/openclaw-dreaming-guide-2026
+- OC dreaming docs: https://docs.openclaw.ai/concepts/dreaming
+- OC memory docs: https://docs.openclaw.ai/concepts/memory
+- OC dreaming config ref: https://docs.openclaw.ai/reference/memory-config
+- `openclaw memory rem-harness --json` — preview REM output (run locally)
+- `openclaw memory status` — shows dreaming state per agent (currently all off)
 - Brain schema: `~/projects/zeresh-brain/docker/init/002-schema.sql`
-- Brain TODO: "Design memory consolidation system" (brain entry 00a509f5)
-- Abelard RL paper: software-as-RL-policy parallels (the dreaming pipeline
-  IS an RL loop — recall frequency is the reward signal, entry quality is
-  the policy, consolidation is the update step)
+- Brain MCP server: `~/projects/zeresh-brain/brain-mcp.py`
+- Brain CLI: `~/projects/zeresh-brain/brain-cli.py`
+- Brain spec: `~/projects/zeresh-brain/docs/SPEC.md`
+- Abelard RL paper: `~/projects/abelard/docs/rl-as-software-development.md`
+- RL↔dreaming insight: brain entry f50ded17 ("The dreaming pipeline IS an RL loop")
+- OC dreaming architecture analysis: brain entry 43c2bfc1
+- CAGC autoresearch (related RL application): brain entry 33c3f356
+- Dreaming plan finalized: brain entry cc32c5a7
+- Design memory consolidation (original TODO): brain entry 00a509f5
+- notify-session.sh (for dream notifications): `~/.openclaw/workspace/scripts/notify-session.sh`
+- alert-lib.sh (for Telegram alerts): `~/.openclaw/workspace/scripts/alert-lib.sh`
+- Morning briefing CONTEXT (dreams will be added here): `~/.openclaw/workspace/projects/morning-briefing/CONTEXT.md`
 
 ---
 
