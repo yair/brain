@@ -6,6 +6,7 @@
 |-----------|-------------------------------------------|
 | `--json`  | JSON output (always use from AI sessions) |
 | `--quiet` | Minimal output (IDs/titles only)          |
+| `--full`  | Show full entry/event bodies (no 200-char truncation). `--json` already returns full bodies. |
 | `--db`    | Database name (default from `BRAIN_DB_NAME` or `brain`) |
 
 ## Search
@@ -30,10 +31,13 @@ debrief.
 ## Recent
 
 ```bash
-brain --json recent [--kind KIND] [--status STATUS] [--project PROJECT] [--since SINCE] [--limit N]
+brain --json recent [--kind KIND] [--status STATUS] [--project PROJECT] [--source SOURCE] [--since SINCE] [--limit N]
 ```
 
 Returns entries ordered by creation time, newest first. Default limit: 10.
+
+**--source** filters by who wrote the entry — useful for "what has claude-code
+been up to?" or "what did Jay write recently?"
 
 ## Get
 
@@ -68,8 +72,11 @@ Shortcut for `recent --kind todo --status active --limit 50`.
 ## Entities
 
 ```bash
-brain --json entities
-brain --json entity <slug>
+brain --json entities [--include-deleted]
+brain --json entity <slug> [--include-deleted]
+brain --json add-entity --id <slug> --kind KIND --name "Full Name" [--metadata '{"k":"v"}']
+brain --json update-entity <slug> [--name N] [--kind K] [--metadata JSON] [--merge-metadata JSON]
+brain --json forget-entity <slug>
 ```
 
 Entities are people, projects, tools, clients, or places. Keyed by slug
@@ -78,13 +85,26 @@ Entities are people, projects, tools, clients, or places. Keyed by slug
 Entity metadata is stored as JSONB — can contain arbitrary key-value pairs
 like email, timezone, role, etc.
 
+**--metadata** replaces the JSONB entirely. **--merge-metadata** shallow-merges
+into the existing object (so you don't clobber unrelated keys). Pass one or
+the other.
+
+**forget-entity** is a soft-delete. Entries that reference the entity via
+`entity_refs` keep their reference intact — the entity just stops appearing
+in default listings. Pass `--include-deleted` to show it.
+
 ## Events
 
 ```bash
-brain --json events [--from DATE] [--to DATE]
+brain --json events [--from DATE] [--to DATE] [--include-deleted]
+brain --json add-event --title T --starts-at DATETIME [--ends-at D] [--location L] [--attendees "a,b"] [--notes N]
+brain --json update-event <id> [--title T] [--starts-at D] [--ends-at D] [--location L] [--attendees "a,b"] [--notes N]
+brain --json cancel-event <id>
 ```
 
-Calendar events. Defaults to today through 7 days from now.
+Calendar events. Defaults to today through 7 days from now. **cancel-event**
+is a soft-delete (sets `deleted_at`); cancelled events are hidden unless
+`--include-deleted` is passed.
 
 ## Where (location)
 
@@ -190,13 +210,6 @@ history for that specific entry.
 brain --json log-location --lat LAT --lon LON [--label LABEL] [--source SOURCE] [--accuracy M]
 ```
 
-## Add Event
-
-```bash
-brain --json add-event --title T --starts-at DATETIME \
-  [--ends-at DATETIME] [--location LOC] [--attendees "a,b,c"] [--notes N] [--source S]
-```
-
 ## Embed
 
 ```bash
@@ -209,10 +222,23 @@ entries that were created without an API key.
 
 ## Environment variables
 
-| Variable           | Default          | Purpose                    |
-|--------------------|------------------|----------------------------|
-| `BRAIN_DB_HOST`    | 127.0.0.1        | Database host              |
-| `BRAIN_DB_PORT`    | 5432             | Database port              |
-| `BRAIN_DB_USER`    | brain            | Database user              |
-| `BRAIN_DB_PASSWORD` | (none)           | Database password          |
-| `GEMINI_API_KEY`   | (none)           | For embedding generation   |
+Brain uses role separation: the CLI connects as `brain_cli` (not the
+superuser `brain` role). Every client host needs the CLI credentials;
+only the admin host needs the admin + dream credentials.
+
+| Variable                  | Default   | Who needs it                | Purpose |
+|---------------------------|-----------|-----------------------------|---------|
+| `BRAIN_DB_HOST`           | 127.0.0.1 | all clients                 | Database host |
+| `BRAIN_DB_PORT`           | 5432      | all clients                 | Database port |
+| `BRAIN_DB_NAME`           | brain     | all clients                 | Database name (e.g. `zeresh_brain`) |
+| `BRAIN_CLI_DB_USER`       | —         | all clients                 | CLI role (usually `brain_cli`) |
+| `BRAIN_CLI_DB_PASSWORD`   | —         | all clients                 | CLI role password |
+| `BRAIN_DREAM_DB_USER`     | —         | admin/dreamer host only     | Dreamer role |
+| `BRAIN_DREAM_DB_PASSWORD` | —         | admin/dreamer host only     | Dreamer role password |
+| `BRAIN_ADMIN_DB_USER`     | —         | admin host + backup scripts | Admin role (superuser) |
+| `BRAIN_ADMIN_DB_PASSWORD` | —         | admin host + backup scripts | Admin role password |
+| `GEMINI_API_KEY`          | —         | any writer                  | For embedding generation |
+
+The CLI fails loudly if `BRAIN_CLI_DB_USER` / `BRAIN_CLI_DB_PASSWORD`
+aren't set — by design, so the transition from the old superuser-everywhere
+setup is explicit.

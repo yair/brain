@@ -130,25 +130,39 @@ GPS coordinates with source, accuracy, and label.
 
 ```bash
 brain search "query" [--kind K] [--project P] [--since S] [--limit N]
-brain recent [--kind K] [--status S] [--project P] [--since S] [--limit N]
+brain recent [--kind K] [--status S] [--project P] [--source SRC] [--since S] [--limit N]
 brain get <entry-id>
 brain context <project>        # decisions + TODOs + entities + recent
 brain todos [--project P]
-brain entities
-brain entity <slug>
-brain events [--from D] [--to D]
+brain entities [--include-deleted]
+brain entity <slug> [--include-deleted]
+brain events [--from D] [--to D] [--include-deleted]
 brain where                    # latest known location
 brain stats
 ```
 
-### Writing
+### Writing: entries
 
 ```bash
 brain remember --kind K --title T --body B [--source S] [--project P] [--tags T] [--entity-refs E]
 brain update <id> [--status S] [--body B] [--title T] [--confidence C]
 brain supersede <old-id> --title T --body B
-brain forget <id>
+brain forget <id>              # soft-delete (sets expires_at)
 brain boost [--retrieval R] <ids-or-positions...> [--source S] [--context C]
+```
+
+### Writing: entities & events
+
+```bash
+brain add-entity --id <slug> --kind K --name N [--metadata JSON]
+brain update-entity <slug> [--name N] [--kind K] [--metadata JSON | --merge-metadata JSON]
+brain forget-entity <slug>     # soft-delete (sets deleted_at)
+
+brain add-event --title T --starts-at D [--ends-at D] [--location L] [--attendees A] [--notes N]
+brain update-event <id> [--title T] [--starts-at D] [...]
+brain cancel-event <id>        # soft-delete (sets deleted_at)
+
+brain log-location --lat LAT --lon LON [--label L] [--source S] [--accuracy M]
 ```
 
 ### Global flags
@@ -157,6 +171,7 @@ brain boost [--retrieval R] <ids-or-positions...> [--source S] [--context C]
 |------|--------|
 | `--json` | Structured JSON output (use from AI agents) |
 | `--quiet` | Minimal output (IDs/titles only) |
+| `--full` | Disable the 200-char body/notes truncation in terminal output |
 | `--db` | Database name (default from `BRAIN_DB_NAME` env var) |
 
 ## Search ranking
@@ -183,17 +198,28 @@ whatever host/port is configured — local or tunneled.
 ## Configuration
 
 All configuration is via environment variables (loaded from `.env`
-by the wrapper scripts):
+by the wrapper scripts). Brain uses three Postgres roles:
 
-| Variable | Default | Purpose |
-|----------|---------|---------|
-| `BRAIN_DB_HOST` | 127.0.0.1 | Database host |
-| `BRAIN_DB_PORT` | 5432 | Database port |
-| `BRAIN_DB_USER` | brain | Database user |
-| `BRAIN_DB_PASSWORD` | (none) | Database password |
-| `BRAIN_DB_NAME` | brain | Database name |
-| `GEMINI_API_KEY` | (none) | For embedding generation |
-| `BRAIN_MCP_PORT` | 8787 | MCP server port (SSE mode) |
+- **`brain`** (superuser) — admin + break-glass + table owner.
+- **`brain_cli`** — CLI/MCP/skill clients connect as this role.
+- **`brain_dream`** — the dreaming daemon connects as this role.
+
+Hosts that only run the CLI need `BRAIN_CLI_DB_*`. The admin host also
+needs `BRAIN_ADMIN_DB_*` (backup scripts) and `BRAIN_DREAM_DB_*` (dreamer).
+
+| Variable | Needed on | Purpose |
+|----------|-----------|---------|
+| `BRAIN_DB_HOST` | all | Database host (default 127.0.0.1) |
+| `BRAIN_DB_PORT` | all | Database port (default 5432) |
+| `BRAIN_DB_NAME` | all | Database name |
+| `BRAIN_CLI_DB_USER` | all clients | CLI role name (usually `brain_cli`) |
+| `BRAIN_CLI_DB_PASSWORD` | all clients | CLI role password |
+| `BRAIN_DREAM_DB_USER` | admin host | Dreamer role name |
+| `BRAIN_DREAM_DB_PASSWORD` | admin host | Dreamer role password |
+| `BRAIN_ADMIN_DB_USER` | admin host | Superuser role name (`brain`) |
+| `BRAIN_ADMIN_DB_PASSWORD` | admin host | Superuser password |
+| `GEMINI_API_KEY` | any writer | For embedding generation |
+| `BRAIN_MCP_PORT` | MCP SSE | MCP server port (default 8787) |
 
 ## Files
 

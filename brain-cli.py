@@ -16,11 +16,12 @@ import requests
 # Register UUID adapter
 psycopg2.extras.register_uuid()
 
+
 DB_DEFAULTS = {
     "host": os.environ.get("BRAIN_DB_HOST", "127.0.0.1"),
     "port": int(os.environ.get("BRAIN_DB_PORT", "5432")),
-    "user": os.environ.get("BRAIN_DB_USER", "brain"),
-    "password": os.environ.get("BRAIN_DB_PASSWORD", ""),
+    "user": os.environ.get("BRAIN_CLI_DB_USER", ""),
+    "password": os.environ.get("BRAIN_CLI_DB_PASSWORD", ""),
 }
 
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
@@ -31,6 +32,13 @@ GEMINI_EMBED_URL = (
 
 
 def get_conn(db: str) -> psycopg2.extensions.connection:
+    if not DB_DEFAULTS["user"] or not DB_DEFAULTS["password"]:
+        click.echo(
+            "Error: BRAIN_CLI_DB_USER and BRAIN_CLI_DB_PASSWORD must be set in .env. "
+            "Brain CLI uses the brain_cli role (not the superuser brain role).",
+            err=True,
+        )
+        sys.exit(1)
     try:
         return psycopg2.connect(dbname=db, **DB_DEFAULTS)
     except psycopg2.OperationalError as e:
@@ -70,6 +78,21 @@ def parse_since(since: str | None) -> datetime | None:
     sys.exit(2)
 
 
+def parse_metadata(s: str | None) -> dict | None:
+    """Parse a JSON object from the command line. Exit on invalid input."""
+    if s is None:
+        return None
+    try:
+        val = json.loads(s)
+    except json.JSONDecodeError as e:
+        click.echo(f"Error: --metadata is not valid JSON: {e}", err=True)
+        sys.exit(2)
+    if not isinstance(val, dict):
+        click.echo("Error: --metadata must be a JSON object", err=True)
+        sys.exit(2)
+    return val
+
+
 def generate_embedding(text: str) -> list[float] | None:
     """Generate a 768-dim embedding via Gemini gemini-embedding-001."""
     try:
@@ -85,7 +108,7 @@ def generate_embedding(text: str) -> list[float] | None:
         return None
 
 
-def format_entry(row: dict, quiet: bool = False) -> str:
+def format_entry(row: dict, quiet: bool = False, full: bool = False) -> str:
     if quiet:
         return row["title"]
     lines = []
@@ -124,17 +147,19 @@ def format_entry(row: dict, quiet: bool = False) -> str:
         lines.append(click.style(f"  {ts:%Y-%m-%d %H:%M}", dim=True))
     if row.get("body"):
         body = row["body"]
-        if len(body) > 200:
+        if not full and len(body) > 200:
             body = body[:200] + "..."
         lines.append(f"  {body}")
     return "\n".join(lines)
 
 
-def format_entity(row: dict, quiet: bool = False) -> str:
+def format_entity(row: dict, quiet: bool = False, full: bool = False) -> str:
     if quiet:
         return f"{row['id']}: {row['name']}"
+    deleted = " [deleted]" if row.get("deleted_at") else ""
     lines = [
-        click.style(f"{row['id']}", fg="cyan", bold=True) + f" — {row['name']} ({row['kind']})",
+        click.style(f"{row['id']}", fg="cyan", bold=True)
+        + f" — {row['name']} ({row['kind']}){deleted}",
     ]
     if row.get("metadata"):
         for k, v in row["metadata"].items():
@@ -142,26 +167,29 @@ def format_entity(row: dict, quiet: bool = False) -> str:
     return "\n".join(lines)
 
 
-def format_event(row: dict, quiet: bool = False) -> str:
+def format_event(row: dict, quiet: bool = False, full: bool = False) -> str:
     if quiet:
         return f"{row['starts_at']:%Y-%m-%d %H:%M} {row['title']}"
+    cancelled = " [cancelled]" if row.get("deleted_at") else ""
     lines = [
         click.style(f"{row['starts_at']:%Y-%m-%d %H:%M}", fg="yellow")
-        + f" {row['title']}"
+        + f" {row['title']}{cancelled}"
     ]
     if row.get("location"):
         lines.append(f"  Location: {row['location']}")
     if row.get("attendees"):
         lines.append(f"  Attendees: {', '.join(row['attendees'])}")
     if row.get("notes"):
-        lines.append(f"  {row['notes']}")
+        notes = row["notes"]
+        if not full and len(notes) > 200:
+            notes = notes[:200] + "..."
+        lines.append(f"  {notes}")
     lines.append(click.style(f"  id: {row['id']}", dim=True))
     return "\n".join(lines)
 
 
-def output_results(items: list, formatter, as_json: bool, quiet: bool):
+def output_results(items: list, formatter, as_json: bool, quiet: bool, full: bool = False):
     if as_json:
-        # Convert to serializable dicts
         out = []
         for item in items:
             d = dict(item)
@@ -170,7 +198,6 @@ def output_results(items: list, formatter, as_json: bool, quiet: bool):
                     d[k] = v.isoformat()
                 elif isinstance(v, uuid.UUID):
                     d[k] = str(v)
-            # Drop embedding from output (too large)
             d.pop("embedding", None)
             d.pop("tsv", None)
             out.append(d)
@@ -180,7 +207,7 @@ def output_results(items: list, formatter, as_json: bool, quiet: bool):
             click.echo("No results.")
             return
         for item in items:
-            click.echo(formatter(item, quiet=quiet))
+            click.echo(formatter(item, quiet=quiet, full=full))
             click.echo()
 
 
@@ -188,16 +215,22 @@ def output_results(items: list, formatter, as_json: bool, quiet: bool):
 
 
 @click.group()
-@click.option("--db", default=os.environ.get("BRAIN_DB_NAME", "brain"), help="Database name")
-@click.option("--json", "as_json", is_flag=True, help="JSON output")
-@click.option("--quiet", is_flag=True, help="Minimal output")
+@click.option("--db", default=os.environ.get("BRAIN_DB_NAME", "brain"),
+              help="Database name (default: $BRAIN_DB_NAME or 'brain')")
+@click.option("--json", "as_json", is_flag=True,
+              help="Structured JSON output (for agents and scripts)")
+@click.option("--quiet", is_flag=True,
+              help="Minimal output: IDs on writes, titles on reads")
+@click.option("--full", is_flag=True,
+              help="Show full entry/event bodies (no 200-char truncation)")
 @click.pass_context
-def cli(ctx, db: str, as_json: bool, quiet: bool):
+def cli(ctx, db: str, as_json: bool, quiet: bool, full: bool):
     """brain — CLI for the brain shared memory database."""
     ctx.ensure_object(dict)
     ctx.obj["db"] = db
     ctx.obj["json"] = as_json
     ctx.obj["quiet"] = quiet
+    ctx.obj["full"] = full
 
 
 # ── stats ────────────────────────────────────────────────────────────
@@ -209,15 +242,21 @@ def stats(ctx):
     """Show counts of entries by kind, entities, and events."""
     conn = get_conn(ctx.obj["db"])
     cur = conn.cursor()
-    cur.execute("SELECT kind, count(*) FROM entries WHERE (expires_at IS NULL OR expires_at > now()) GROUP BY kind ORDER BY count DESC")
+    cur.execute(
+        "SELECT kind, count(*) FROM entries "
+        "WHERE (expires_at IS NULL OR expires_at > now()) "
+        "GROUP BY kind ORDER BY count DESC"
+    )
     kinds = cur.fetchall()
-    cur.execute("SELECT count(*) FROM entities")
+    cur.execute("SELECT count(*) FROM entities WHERE deleted_at IS NULL")
     entity_count = cur.fetchone()[0]
-    cur.execute("SELECT count(*) FROM events")
+    cur.execute("SELECT count(*) FROM events WHERE deleted_at IS NULL")
     event_count = cur.fetchone()[0]
     cur.execute("SELECT count(*) FROM entries WHERE embedding IS NOT NULL")
     embedded = cur.fetchone()[0]
-    cur.execute("SELECT count(*) FROM entries WHERE (expires_at IS NULL OR expires_at > now())")
+    cur.execute(
+        "SELECT count(*) FROM entries WHERE (expires_at IS NULL OR expires_at > now())"
+    )
     total = cur.fetchone()[0]
     conn.close()
 
@@ -242,14 +281,15 @@ def stats(ctx):
 
 
 @cli.command()
-@click.option("--kind", help="Filter by entry kind")
-@click.option("--status", help="Filter by status")
-@click.option("--project", help="Filter by project")
+@click.option("--kind", help="Filter by entry kind (decision, fact, todo, ...)")
+@click.option("--status", help="Filter by status (active, superseded, expired, deleted)")
+@click.option("--project", help="Filter by project slug")
+@click.option("--source", help="Filter by source (who wrote it: claude-code, jay, ...)")
 @click.option("--since", help="Entries since (e.g. '3 days ago', '2026-01-01')")
-@click.option("--limit", default=10, help="Max results")
+@click.option("--limit", default=10, help="Max results (default: 10)")
 @click.pass_context
-def recent(ctx, kind, status, project, since, limit):
-    """Show recent entries."""
+def recent(ctx, kind, status, project, source, since, limit):
+    """Show recent entries, newest first."""
     conn = get_conn(ctx.obj["db"])
     cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
     conditions = ["(expires_at IS NULL OR expires_at > now())"]
@@ -263,6 +303,9 @@ def recent(ctx, kind, status, project, since, limit):
     if project:
         conditions.append("project = %s")
         params.append(project)
+    if source:
+        conditions.append("source = %s")
+        params.append(source)
     since_dt = parse_since(since)
     if since_dt:
         conditions.append("created_at >= %s")
@@ -275,7 +318,7 @@ def recent(ctx, kind, status, project, since, limit):
     )
     rows = cur.fetchall()
     conn.close()
-    output_results(rows, format_entry, ctx.obj["json"], ctx.obj["quiet"])
+    output_results(rows, format_entry, ctx.obj["json"], ctx.obj["quiet"], ctx.obj["full"])
 
 
 # ── search ───────────────────────────────────────────────────────────
@@ -284,12 +327,12 @@ def recent(ctx, kind, status, project, since, limit):
 @cli.command()
 @click.argument("query")
 @click.option("--kind", help="Filter by entry kind")
-@click.option("--project", help="Filter by project")
-@click.option("--since", help="Entries since")
-@click.option("--limit", default=10, help="Max results")
+@click.option("--project", help="Filter by project slug")
+@click.option("--since", help="Entries since (e.g. '3 days ago')")
+@click.option("--limit", default=10, help="Max results (default: 10)")
 @click.pass_context
 def search(ctx, query, kind, project, since, limit):
-    """Hybrid semantic + keyword search."""
+    """Hybrid semantic + keyword search (returns retrieval_id for boost)."""
     conn = get_conn(ctx.obj["db"])
     cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
 
@@ -309,11 +352,9 @@ def search(ctx, query, kind, project, since, limit):
 
     where = " AND ".join(conditions)
 
-    # Try to get embedding for semantic search
     emb = generate_embedding(query)
 
-    # Boost subquery: count recent boosts with time decay
-    # Each boost adds score, but decays over 30 days (boost from today = 1.0, 30 days ago = 0.0)
+    # Boost from access_log, time-decayed over 30 days
     boost_sub = """
         COALESCE((
             SELECT SUM(GREATEST(0, 1.0 - EXTRACT(EPOCH FROM (now() - accessed_at)) / (30*86400)))
@@ -339,7 +380,6 @@ def search(ctx, query, kind, project, since, limit):
             params_q,
         )
     else:
-        # Fallback: keyword only
         params_q = [query] + params + [query, limit]
         cur.execute(
             f"""
@@ -357,7 +397,6 @@ def search(ctx, query, kind, project, since, limit):
 
     rows = cur.fetchall()
 
-    # Record retrieval for boost referencing
     retrieval_id = None
     if rows:
         result_ids = [r["id"] for r in rows]
@@ -371,9 +410,7 @@ def search(ctx, query, kind, project, since, limit):
 
     conn.close()
 
-    # Show retrieval ID in output
     if ctx.obj["json"]:
-        # In JSON mode, wrap results with retrieval_id
         out = []
         for item in rows:
             d = dict(item)
@@ -391,7 +428,7 @@ def search(ctx, query, kind, project, since, limit):
         if retrieval_id and not ctx.obj["quiet"]:
             click.echo(f"retrieval: {retrieval_id}")
             click.echo("")
-        output_results(rows, format_entry, False, ctx.obj["quiet"])
+        output_results(rows, format_entry, False, ctx.obj["quiet"], ctx.obj["full"])
 
 
 # ── get ──────────────────────────────────────────────────────────────
@@ -410,7 +447,7 @@ def get(ctx, entry_id):
     if not row:
         click.echo(f"Entry {entry_id} not found.", err=True)
         sys.exit(1)
-    output_results([row], format_entry, ctx.obj["json"], ctx.obj["quiet"])
+    output_results([row], format_entry, ctx.obj["json"], ctx.obj["quiet"], ctx.obj["full"])
 
 
 # ── entity / entities ────────────────────────────────────────────────
@@ -418,30 +455,142 @@ def get(ctx, entry_id):
 
 @cli.command()
 @click.argument("slug")
+@click.option("--include-deleted", is_flag=True, help="Show even if soft-deleted")
 @click.pass_context
-def entity(ctx, slug):
+def entity(ctx, slug, include_deleted):
     """Get entity by slug."""
     conn = get_conn(ctx.obj["db"])
     cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
-    cur.execute("SELECT * FROM entities WHERE id = %s", [slug])
+    if include_deleted:
+        cur.execute("SELECT * FROM entities WHERE id = %s", [slug])
+    else:
+        cur.execute("SELECT * FROM entities WHERE id = %s AND deleted_at IS NULL", [slug])
     row = cur.fetchone()
     conn.close()
     if not row:
         click.echo(f"Entity '{slug}' not found.", err=True)
         sys.exit(1)
-    output_results([row], format_entity, ctx.obj["json"], ctx.obj["quiet"])
+    output_results([row], format_entity, ctx.obj["json"], ctx.obj["quiet"], ctx.obj["full"])
 
 
 @cli.command()
+@click.option("--include-deleted", is_flag=True, help="Include soft-deleted entities")
 @click.pass_context
-def entities(ctx):
+def entities(ctx, include_deleted):
     """List all entities."""
     conn = get_conn(ctx.obj["db"])
     cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
-    cur.execute("SELECT * FROM entities ORDER BY kind, id")
+    if include_deleted:
+        cur.execute("SELECT * FROM entities ORDER BY kind, id")
+    else:
+        cur.execute("SELECT * FROM entities WHERE deleted_at IS NULL ORDER BY kind, id")
     rows = cur.fetchall()
     conn.close()
-    output_results(rows, format_entity, ctx.obj["json"], ctx.obj["quiet"])
+    output_results(rows, format_entity, ctx.obj["json"], ctx.obj["quiet"], ctx.obj["full"])
+
+
+@cli.command("add-entity")
+@click.option("--id", "slug", required=True, help="Slug (unique id, e.g. 'alice')")
+@click.option("--kind", required=True, help="person, project, client, tool, place")
+@click.option("--name", required=True, help="Display name")
+@click.option("--metadata", help="JSON object of arbitrary metadata")
+@click.pass_context
+def add_entity(ctx, slug, kind, name, metadata):
+    """Create a new entity (person, project, tool, place, ...)."""
+    meta = parse_metadata(metadata) or {}
+    conn = get_conn(ctx.obj["db"])
+    cur = conn.cursor()
+    try:
+        cur.execute(
+            "INSERT INTO entities (id, kind, name, metadata) VALUES (%s, %s, %s, %s::jsonb)",
+            [slug, kind, name, json.dumps(meta)],
+        )
+    except psycopg2.errors.UniqueViolation:
+        click.echo(f"Entity '{slug}' already exists. Use update-entity to modify it.", err=True)
+        sys.exit(1)
+    conn.commit()
+    conn.close()
+    if ctx.obj["json"]:
+        click.echo(json.dumps({"id": slug, "status": "created"}))
+    elif ctx.obj["quiet"]:
+        click.echo(slug)
+    else:
+        click.echo(f"Created entity {slug}: {name} ({kind})")
+
+
+@cli.command("update-entity")
+@click.argument("slug")
+@click.option("--name", help="New display name")
+@click.option("--kind", help="New kind")
+@click.option("--metadata", help="Replace metadata entirely with this JSON object")
+@click.option("--merge-metadata", help="Shallow-merge this JSON object into existing metadata")
+@click.pass_context
+def update_entity(ctx, slug, name, kind, metadata, merge_metadata):
+    """Update an existing entity's fields or metadata."""
+    if metadata and merge_metadata:
+        click.echo("Error: pass --metadata OR --merge-metadata, not both", err=True)
+        sys.exit(2)
+    new_meta = parse_metadata(metadata)
+    merge_meta = parse_metadata(merge_metadata)
+
+    updates, params = [], []
+    if name is not None:
+        updates.append("name = %s")
+        params.append(name)
+    if kind is not None:
+        updates.append("kind = %s")
+        params.append(kind)
+    if new_meta is not None:
+        updates.append("metadata = %s::jsonb")
+        params.append(json.dumps(new_meta))
+    elif merge_meta is not None:
+        updates.append("metadata = COALESCE(metadata, '{}'::jsonb) || %s::jsonb")
+        params.append(json.dumps(merge_meta))
+
+    if not updates:
+        click.echo("Nothing to update.", err=True)
+        sys.exit(2)
+
+    params.append(slug)
+    conn = get_conn(ctx.obj["db"])
+    cur = conn.cursor()
+    cur.execute(
+        f"UPDATE entities SET {', '.join(updates)} WHERE id = %s",
+        params,
+    )
+    if cur.rowcount == 0:
+        click.echo(f"Entity '{slug}' not found.", err=True)
+        sys.exit(1)
+    conn.commit()
+    conn.close()
+    if ctx.obj["json"]:
+        click.echo(json.dumps({"id": slug, "status": "updated"}))
+    elif ctx.obj["quiet"]:
+        click.echo(slug)
+    else:
+        click.echo(f"Updated entity {slug}")
+
+
+@cli.command("forget-entity")
+@click.argument("slug")
+@click.pass_context
+def forget_entity(ctx, slug):
+    """Soft-delete an entity (sets deleted_at). Entry references remain valid."""
+    conn = get_conn(ctx.obj["db"])
+    cur = conn.cursor()
+    cur.execute("UPDATE entities SET deleted_at = now() WHERE id = %s AND deleted_at IS NULL",
+                [slug])
+    if cur.rowcount == 0:
+        click.echo(f"Entity '{slug}' not found (or already deleted).", err=True)
+        sys.exit(1)
+    conn.commit()
+    conn.close()
+    if ctx.obj["json"]:
+        click.echo(json.dumps({"id": slug, "status": "forgotten"}))
+    elif ctx.obj["quiet"]:
+        click.echo(slug)
+    else:
+        click.echo(f"Forgotten entity {slug}")
 
 
 # ── events ───────────────────────────────────────────────────────────
@@ -450,31 +599,144 @@ def entities(ctx):
 @cli.command()
 @click.option("--from", "from_date", help="Start date (default: today)")
 @click.option("--to", "to_date", help="End date (default: 7 days from now)")
+@click.option("--include-deleted", is_flag=True, help="Include cancelled events")
 @click.pass_context
-def events(ctx, from_date, to_date):
-    """Show upcoming events."""
+def events(ctx, from_date, to_date, include_deleted):
+    """Show events in a date range (default: next 7 days)."""
     conn = get_conn(ctx.obj["db"])
     cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
-    start = parse_since(from_date) if from_date else datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0)
+    start = (parse_since(from_date) if from_date
+             else datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0))
     end = parse_since(to_date) if to_date else start + timedelta(days=7)
+    deleted_clause = "" if include_deleted else " AND deleted_at IS NULL"
     cur.execute(
-        "SELECT * FROM events WHERE starts_at >= %s AND starts_at <= %s ORDER BY starts_at",
+        f"SELECT * FROM events WHERE starts_at >= %s AND starts_at <= %s{deleted_clause} "
+        "ORDER BY starts_at",
         [start, end],
     )
     rows = cur.fetchall()
     conn.close()
-    output_results(rows, format_event, ctx.obj["json"], ctx.obj["quiet"])
+    output_results(rows, format_event, ctx.obj["json"], ctx.obj["quiet"], ctx.obj["full"])
+
+
+@cli.command("add-event")
+@click.option("--title", required=True)
+@click.option("--starts-at", required=True, help="Start time (e.g. '2026-03-10 09:00')")
+@click.option("--ends-at", help="End time")
+@click.option("--location", "loc", help="Location")
+@click.option("--attendees", help="Comma-separated attendees")
+@click.option("--notes", help="Notes")
+@click.option("--source", default="manual", help="Source identifier")
+@click.pass_context
+def add_event(ctx, title, starts_at, ends_at, loc, attendees, notes, source):
+    """Add a calendar event."""
+    conn = get_conn(ctx.obj["db"])
+    cur = conn.cursor()
+    attendee_list = [a.strip() for a in attendees.split(",")] if attendees else []
+    cur.execute(
+        "INSERT INTO events (title, starts_at, ends_at, location, attendees, notes, source) "
+        "VALUES (%s, %s, %s, %s, %s, %s, %s) RETURNING id",
+        [title, starts_at, ends_at, loc, attendee_list, notes, source],
+    )
+    event_id = cur.fetchone()[0]
+    conn.commit()
+    conn.close()
+
+    if ctx.obj["json"]:
+        click.echo(json.dumps({"id": str(event_id), "status": "created"}))
+    elif ctx.obj["quiet"]:
+        click.echo(str(event_id))
+    else:
+        click.echo(f"Added event {event_id}: {title}")
+
+
+@cli.command("update-event")
+@click.argument("event_id")
+@click.option("--title", help="New title")
+@click.option("--starts-at", help="New start time")
+@click.option("--ends-at", help="New end time")
+@click.option("--location", "loc", help="New location")
+@click.option("--attendees", help="New comma-separated attendees (replaces existing)")
+@click.option("--notes", help="New notes")
+@click.pass_context
+def update_event(ctx, event_id, title, starts_at, ends_at, loc, attendees, notes):
+    """Update an event's fields."""
+    updates, params = [], []
+    if title is not None:
+        updates.append("title = %s")
+        params.append(title)
+    if starts_at is not None:
+        updates.append("starts_at = %s")
+        params.append(starts_at)
+    if ends_at is not None:
+        updates.append("ends_at = %s")
+        params.append(ends_at)
+    if loc is not None:
+        updates.append("location = %s")
+        params.append(loc)
+    if attendees is not None:
+        updates.append("attendees = %s")
+        params.append([a.strip() for a in attendees.split(",")] if attendees else [])
+    if notes is not None:
+        updates.append("notes = %s")
+        params.append(notes)
+
+    if not updates:
+        click.echo("Nothing to update.", err=True)
+        sys.exit(2)
+
+    params.append(event_id)
+    conn = get_conn(ctx.obj["db"])
+    cur = conn.cursor()
+    cur.execute(
+        f"UPDATE events SET {', '.join(updates)} WHERE id = %s",
+        params,
+    )
+    if cur.rowcount == 0:
+        click.echo(f"Event {event_id} not found.", err=True)
+        sys.exit(1)
+    conn.commit()
+    conn.close()
+    if ctx.obj["json"]:
+        click.echo(json.dumps({"id": event_id, "status": "updated"}))
+    elif ctx.obj["quiet"]:
+        click.echo(event_id)
+    else:
+        click.echo(f"Updated event {event_id}")
+
+
+@cli.command("cancel-event")
+@click.argument("event_id")
+@click.pass_context
+def cancel_event(ctx, event_id):
+    """Soft-delete / cancel an event (sets deleted_at)."""
+    conn = get_conn(ctx.obj["db"])
+    cur = conn.cursor()
+    cur.execute("UPDATE events SET deleted_at = now() WHERE id = %s AND deleted_at IS NULL",
+                [event_id])
+    if cur.rowcount == 0:
+        click.echo(f"Event {event_id} not found (or already cancelled).", err=True)
+        sys.exit(1)
+    conn.commit()
+    conn.close()
+    if ctx.obj["json"]:
+        click.echo(json.dumps({"id": event_id, "status": "cancelled"}))
+    elif ctx.obj["quiet"]:
+        click.echo(event_id)
+    else:
+        click.echo(f"Cancelled event {event_id}")
 
 
 # ── todos ────────────────────────────────────────────────────────────
 
 
 @cli.command()
-@click.option("--project", help="Filter by project")
+@click.option("--project", help="Filter by project slug")
 @click.pass_context
 def todos(ctx, project):
-    """Show open TODOs."""
-    ctx.invoke(recent, kind="todo", status="active", project=project, since=None, limit=50)
+    """Show open TODOs (shortcut for: recent --kind todo --status active)."""
+    ctx.invoke(recent, kind="todo", status="active", project=project,
+               source=None, since=None, limit=50)
 
 
 # ── where (location) ─────────────────────────────────────────────────
@@ -500,7 +762,8 @@ def where(ctx):
         click.echo(json.dumps(d, indent=2, default=str))
     else:
         label = row.get("label") or "unknown"
-        click.echo(f"{label} ({row.get('lat')}, {row.get('lon')}) — {row.get('source')} @ {row.get('timestamp')}")
+        click.echo(f"{label} ({row.get('lat')}, {row.get('lon')}) — "
+                   f"{row.get('source')} @ {row.get('timestamp')}")
 
 
 # ── context ──────────────────────────────────────────────────────────
@@ -510,36 +773,39 @@ def where(ctx):
 @click.argument("project")
 @click.pass_context
 def context(ctx, project):
-    """Dump recent decisions, open TODOs, and entities for a project."""
+    """Dump decisions, open TODOs, entities, and recent entries for a project."""
     conn = get_conn(ctx.obj["db"])
     cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
 
     sections = {}
 
-    # Recent decisions
     cur.execute(
-        "SELECT * FROM entries WHERE project = %s AND kind = 'decision' AND (expires_at IS NULL OR expires_at > now()) ORDER BY created_at DESC LIMIT 10",
+        "SELECT * FROM entries WHERE project = %s AND kind = 'decision' "
+        "AND (expires_at IS NULL OR expires_at > now()) "
+        "ORDER BY created_at DESC LIMIT 10",
         [project],
     )
     sections["decisions"] = cur.fetchall()
 
-    # Open TODOs
     cur.execute(
-        "SELECT * FROM entries WHERE project = %s AND kind = 'todo' AND status = 'active' AND (expires_at IS NULL OR expires_at > now()) ORDER BY created_at DESC",
+        "SELECT * FROM entries WHERE project = %s AND kind = 'todo' AND status = 'active' "
+        "AND (expires_at IS NULL OR expires_at > now()) ORDER BY created_at DESC",
         [project],
     )
     sections["todos"] = cur.fetchall()
 
-    # Related entities
     cur.execute(
-        "SELECT * FROM entities WHERE id = %s OR %s = ANY(SELECT unnest(entity_refs) FROM entries WHERE project = %s)",
+        "SELECT * FROM entities WHERE deleted_at IS NULL AND (id = %s OR %s = ANY("
+        "  SELECT unnest(entity_refs) FROM entries WHERE project = %s"
+        "))",
         [project, project, project],
     )
     sections["entities"] = cur.fetchall()
 
-    # Recent entries (all kinds)
     cur.execute(
-        "SELECT * FROM entries WHERE project = %s AND (expires_at IS NULL OR expires_at > now()) ORDER BY created_at DESC LIMIT 10",
+        "SELECT * FROM entries WHERE project = %s "
+        "AND (expires_at IS NULL OR expires_at > now()) "
+        "ORDER BY created_at DESC LIMIT 10",
         [project],
     )
     sections["recent"] = cur.fetchall()
@@ -568,7 +834,7 @@ def context(ctx, project):
                 click.echo("  (none)")
             formatter = format_entity if section == "entities" else format_entry
             for row in rows:
-                click.echo(formatter(row, quiet=ctx.obj["quiet"]))
+                click.echo(formatter(row, quiet=ctx.obj["quiet"], full=ctx.obj["full"]))
                 click.echo()
 
 
@@ -576,18 +842,18 @@ def context(ctx, project):
 
 
 @cli.command()
-@click.option("--kind", required=True, help="Entry kind (decision, fact, todo, etc.)")
+@click.option("--kind", required=True, help="Entry kind (decision, fact, todo, insight, observation, preference, debrief)")
 @click.option("--title", required=True, help="Short title")
 @click.option("--body", required=True, help="Full content")
-@click.option("--source", default="cli", help="Source identifier")
+@click.option("--source", default="cli", help="Source identifier (default: 'cli')")
 @click.option("--project", help="Project slug")
 @click.option("--tags", help="Comma-separated tags")
-@click.option("--entity-refs", help="Comma-separated entity refs")
+@click.option("--entity-refs", help="Comma-separated entity slugs referenced by this entry")
 @click.option("--status", default="active", help="Status (default: active)")
-@click.option("--confidence", type=float, default=1.0, help="Confidence 0-1")
+@click.option("--confidence", type=float, default=1.0, help="Confidence 0..1 (default: 1.0)")
 @click.pass_context
 def remember(ctx, kind, title, body, source, project, tags, entity_refs, status, confidence):
-    """Create a new entry."""
+    """Create a new entry. Auto-generates an embedding via Gemini."""
     conn = get_conn(ctx.obj["db"])
     cur = conn.cursor()
 
@@ -624,9 +890,9 @@ def remember(ctx, kind, title, body, source, project, tags, entity_refs, status,
 
 @cli.command()
 @click.argument("entry_id")
-@click.option("--status", help="New status")
-@click.option("--body", help="New body")
-@click.option("--confidence", type=float, help="New confidence")
+@click.option("--status", help="New status (active, superseded, expired, deleted)")
+@click.option("--body", help="New body (does NOT regenerate embedding; use 'embed' after)")
+@click.option("--confidence", type=float, help="New confidence 0..1")
 @click.option("--title", help="New title")
 @click.pass_context
 def update(ctx, entry_id, status, body, confidence, title):
@@ -653,8 +919,6 @@ def update(ctx, entry_id, status, body, confidence, title):
     for col, val in updates.items():
         set_clauses.append(f"{col} = %s")
         params.append(val)
-
-    # tsv is a generated column — no manual update needed
 
     params.append(entry_id)
     cur.execute(
@@ -685,11 +949,10 @@ def update(ctx, entry_id, status, body, confidence, title):
 @click.option("--source", default="cli", help="Source identifier")
 @click.pass_context
 def supersede(ctx, old_id, title, body, source):
-    """Replace an entry with a new one."""
+    """Replace an entry with a new one. Old entry gets superseded_by set."""
     conn = get_conn(ctx.obj["db"])
     cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
 
-    # Get old entry for kind/project/tags
     cur.execute("SELECT * FROM entries WHERE id = %s", [old_id])
     old = cur.fetchone()
     if not old:
@@ -700,13 +963,13 @@ def supersede(ctx, old_id, title, body, source):
 
     cur.execute(
         """
-        INSERT INTO entries (kind, source, title, body, tags, project, entity_refs, embedding, tsv, status, confidence)
-        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, to_tsvector('english', %s || ' ' || %s), %s, %s)
+        INSERT INTO entries (kind, source, title, body, tags, project, entity_refs, embedding, status, confidence)
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
         RETURNING id
         """,
         [old["kind"], source, title, body, old["tags"], old["project"], old["entity_refs"],
          "[" + ",".join(str(x) for x in emb) + "]" if emb else None,
-         title, body, old["status"], 1.0],
+         old["status"], 1.0],
     )
     new_id = cur.fetchone()["id"]
 
@@ -714,7 +977,10 @@ def supersede(ctx, old_id, title, body, source):
     conn.commit()
     conn.close()
 
-    if ctx.obj["quiet"]:
+    if ctx.obj["json"]:
+        click.echo(json.dumps({"old_id": str(old_id), "new_id": str(new_id),
+                               "status": "superseded"}))
+    elif ctx.obj["quiet"]:
         click.echo(str(new_id))
     else:
         click.echo(f"Superseded {old_id} → {new_id}")
@@ -727,7 +993,7 @@ def supersede(ctx, old_id, title, body, source):
 @click.argument("entry_id")
 @click.pass_context
 def forget(ctx, entry_id):
-    """Soft-delete an entry (set expires_at to now)."""
+    """Soft-delete an entry (sets expires_at to now)."""
     conn = get_conn(ctx.obj["db"])
     cur = conn.cursor()
     cur.execute("UPDATE entries SET expires_at = now() WHERE id = %s", [entry_id])
@@ -749,59 +1015,30 @@ def forget(ctx, entry_id):
 
 
 @cli.command("log-location")
-@click.option("--lat", required=True, type=float)
-@click.option("--lon", required=True, type=float)
-@click.option("--label", help="Location label")
-@click.option("--source", default="manual", help="Source")
+@click.option("--lat", required=True, type=float, help="Latitude")
+@click.option("--lon", required=True, type=float, help="Longitude")
+@click.option("--label", help="Human-readable label (e.g. 'office')")
+@click.option("--source", default="manual", help="Source identifier (default: 'manual')")
 @click.option("--accuracy", type=float, help="Accuracy in meters")
 @click.pass_context
 def log_location(ctx, lat, lon, label, source, accuracy):
-    """Log a location entry."""
+    """Log a GPS/presence point into the location hypertable."""
     conn = get_conn(ctx.obj["db"])
     cur = conn.cursor()
     cur.execute(
-        "INSERT INTO location (source, lat, lon, accuracy_m, label) VALUES (%s, %s, %s, %s, %s) RETURNING id",
+        "INSERT INTO location (timestamp, source, lat, lon, accuracy_m, label) "
+        "VALUES (now(), %s, %s, %s, %s, %s)",
         [source, lat, lon, accuracy, label],
     )
-    loc_id = cur.fetchone()[0]
     conn.commit()
     conn.close()
 
-    if ctx.obj["quiet"]:
-        click.echo(str(loc_id))
+    if ctx.obj["json"]:
+        click.echo(json.dumps({"status": "logged", "label": label}))
+    elif ctx.obj["quiet"]:
+        click.echo(label or "logged")
     else:
-        click.echo(f"Logged location {loc_id}: {label or 'unlabeled'} ({lat}, {lon})")
-
-
-# ── add-event ────────────────────────────────────────────────────────
-
-
-@cli.command("add-event")
-@click.option("--title", required=True)
-@click.option("--starts-at", required=True, help="Start time (e.g. '2026-03-10 09:00')")
-@click.option("--ends-at", help="End time")
-@click.option("--location", "loc", help="Location")
-@click.option("--attendees", help="Comma-separated attendees")
-@click.option("--notes", help="Notes")
-@click.option("--source", default="manual")
-@click.pass_context
-def add_event(ctx, title, starts_at, ends_at, loc, attendees, notes, source):
-    """Add a calendar event."""
-    conn = get_conn(ctx.obj["db"])
-    cur = conn.cursor()
-    attendee_list = [a.strip() for a in attendees.split(",")] if attendees else []
-    cur.execute(
-        "INSERT INTO events (title, starts_at, ends_at, location, attendees, notes, source) VALUES (%s, %s, %s, %s, %s, %s, %s) RETURNING id",
-        [title, starts_at, ends_at, loc, attendee_list, notes, source],
-    )
-    event_id = cur.fetchone()[0]
-    conn.commit()
-    conn.close()
-
-    if ctx.obj["quiet"]:
-        click.echo(str(event_id))
-    else:
-        click.echo(f"Added event {event_id}: {title}")
+        click.echo(f"Logged location: {label or 'unlabeled'} ({lat}, {lon})")
 
 
 # ── embed ────────────────────────────────────────────────────────────
@@ -810,10 +1047,10 @@ def add_event(ctx, title, starts_at, ends_at, loc, attendees, notes, source):
 @cli.command()
 @click.argument("entry_id", required=False)
 @click.option("--all", "embed_all", is_flag=True, help="Embed all entries")
-@click.option("--missing", is_flag=True, help="Only entries missing embeddings")
+@click.option("--missing", is_flag=True, help="Only entries missing embeddings (use with --all)")
 @click.pass_context
 def embed(ctx, entry_id, embed_all, missing):
-    """Generate/update embeddings."""
+    """Generate/update embeddings for one entry, or backfill --all [--missing]."""
     conn = get_conn(ctx.obj["db"])
     cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
 
@@ -845,25 +1082,31 @@ def embed(ctx, entry_id, embed_all, missing):
     click.echo(f"Embedded {count}/{len(rows)} entries")
 
 
+# ── boost / boost-history ────────────────────────────────────────────
+
+
 @cli.command()
 @click.argument("entry_ids", nargs=-1, required=True)
-@click.option("--retrieval", "-r", default=None, help="Retrieval ID to resolve position numbers against")
-@click.option("--context", "ctx_text", default=None, help="What query/task made this useful")
+@click.option("--retrieval", "-r", default=None,
+              help="Retrieval ID: lets you pass positions (1, 2, 3...) instead of UUIDs")
+@click.option("--context", "ctx_text", default=None,
+              help="What query/task made these entries useful")
 @click.option("--kind", default="boost", help="Access kind: boost, cited, acted_on")
-@click.option("--source", default="cli", help="Who is boosting")
+@click.option("--source", default="cli", help="Who is boosting (default: 'cli')")
 @click.pass_context
 def boost(ctx, entry_ids, retrieval, ctx_text, kind, source):
-    """Boost entries that were useful. Improves their ranking in future searches.
+    """Boost entries that were useful (improves their ranking in future searches).
 
-    Usage: brain boost --retrieval <rid> 3 7      (by position in that retrieval)
-           brain boost <uuid> [<uuid> ...]         (by entry ID directly)
+    Usage:
+      brain boost --retrieval <rid> 3 7      (by position in that retrieval)
+      brain boost <uuid> [<uuid> ...]         (by entry ID directly)
 
-    Position numbers (1, 2, 3...) require --retrieval to avoid race conditions.
+    Position numbers require --retrieval to avoid race conditions.
+    Boosts apply to individual ENTRIES, not to the retrieval as a whole.
     """
     conn = get_conn(ctx.obj["db"])
     cur = conn.cursor()
 
-    # Load retrieval for positional references
     positions = {}
     if retrieval:
         cur.execute("SELECT result_ids FROM retrievals WHERE id::text LIKE %s", [retrieval + "%"])
@@ -876,14 +1119,13 @@ def boost(ctx, entry_ids, retrieval, ctx_text, kind, source):
 
     boosted = 0
     for eid in entry_ids:
-        # Resolve positional reference against specific retrieval
         if eid.isdigit() and eid in positions:
             eid = positions[eid]
         elif eid.isdigit() and not positions:
-            click.echo(f"Position '{eid}' requires --retrieval <id>. Use entry UUIDs directly, or pass -r.", err=True)
+            click.echo(f"Position '{eid}' requires --retrieval <id>. "
+                       "Use entry UUIDs directly, or pass -r.", err=True)
             continue
 
-        # Verify entry exists
         cur.execute("SELECT id, title FROM entries WHERE id::text LIKE %s", [eid + "%"])
         row = cur.fetchone()
         if not row:
@@ -908,10 +1150,10 @@ def boost(ctx, entry_ids, retrieval, ctx_text, kind, source):
 
 @cli.command("boost-history")
 @click.argument("entry_id", required=False)
-@click.option("--limit", default=20, help="Max results")
+@click.option("--limit", default=20, help="Max results (default: 20)")
 @click.pass_context
 def boost_history(ctx, entry_id, limit):
-    """Show boost/access history for entries."""
+    """Show boost/access history. With an entry ID: per-entry log; without: most-boosted."""
     conn = get_conn(ctx.obj["db"])
     cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
 
@@ -924,7 +1166,6 @@ def boost_history(ctx, entry_id, limit):
             [entry_id + "%", limit],
         )
     else:
-        # Show most-boosted entries
         cur.execute(
             """SELECT e.id, e.title, e.kind,
                       count(al.id) as boost_count,
@@ -950,10 +1191,12 @@ def boost_history(ctx, entry_id, limit):
 
     if entry_id:
         for r in rows:
-            click.echo(f"  {r['accessed_at']:%Y-%m-%d %H:%M} | {r['kind']} | {r.get('context', '-')}")
+            click.echo(f"  {r['accessed_at']:%Y-%m-%d %H:%M} | {r['kind']} | "
+                       f"{r.get('context', '-')}")
     else:
         for r in rows:
-            click.echo(f"  [{r['kind']}] {r['title']} — {r['boost_count']} boosts (last: {r['last_boosted']:%Y-%m-%d %H:%M})")
+            click.echo(f"  [{r['kind']}] {r['title']} — {r['boost_count']} boosts "
+                       f"(last: {r['last_boosted']:%Y-%m-%d %H:%M})")
 
 
 if __name__ == "__main__":

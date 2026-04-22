@@ -104,7 +104,7 @@ CREATE TABLE retrievals (
 
 -- Access/boost log (improves future search ranking)
 CREATE TABLE access_log (
-    id          UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    id          BIGSERIAL PRIMARY KEY,
     entry_id    UUID NOT NULL REFERENCES entries(id),
     kind        TEXT NOT NULL DEFAULT 'boost',   -- boost, cited, acted_on
     context     TEXT,

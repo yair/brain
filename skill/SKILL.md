@@ -69,12 +69,18 @@ always pass `--json` so output is structured and parseable.
 |------|---------|
 | Project context | `brain --json context <project>` |
 | Search | `brain --json search "query" [--kind K] [--project P] [--limit N]` |
-| Recent entries | `brain --json recent [--kind K] [--status S] [--project P] [--since S]` |
+| Recent entries | `brain --json recent [--kind K] [--status S] [--project P] [--source S] [--since S]` |
 | Get by ID | `brain --json get <uuid>` |
 | Open TODOs | `brain --json todos [--project P]` |
-| All entities | `brain --json entities` |
+| All entities | `brain --json entities [--include-deleted]` |
 | One entity | `brain --json entity <slug>` |
-| Events | `brain --json events [--from D] [--to D]` |
+| Add entity | `brain --json add-entity --id <slug> --kind K --name N [--metadata JSON]` |
+| Update entity | `brain --json update-entity <slug> [--name N] [--merge-metadata JSON]` |
+| Forget entity | `brain --json forget-entity <slug>` |
+| Events | `brain --json events [--from D] [--to D] [--include-deleted]` |
+| Add event | `brain --json add-event --title T --starts-at "YYYY-MM-DD HH:MM" [--location L]` |
+| Update event | `brain --json update-event <id> [--title T] [--starts-at D] [--location L]` |
+| Cancel event | `brain --json cancel-event <id>` |
 | Latest location | `brain --json where` |
 | Stats overview | `brain --json stats` |
 | Remember | `brain --json remember --kind K --title T --body B --source claude-code [--project P] [--tags T]` |
@@ -82,6 +88,8 @@ always pass `--json` so output is structured and parseable.
 | Supersede | `brain --json supersede <old-id> --title T --body B` |
 | Forget | `brain --json forget <id>` |
 | Boost | `brain --json boost --retrieval <rid> <positions> --source claude-code` |
+
+The `--full` global flag disables the 200-char body truncation on search/get/recent/context (handy for humans reading in the terminal; `--json` already returns full bodies).
 
 For the full CLI reference with all flags and examples, read
 `references/cli-reference.md` in this skill directory.

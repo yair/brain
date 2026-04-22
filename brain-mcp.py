@@ -89,16 +89,22 @@ def brain_search(
 def brain_recent(
     kind: str = "",
     project: str = "",
+    source: str = "",
     status: str = "",
     since: str = "",
     limit: int = 10,
 ) -> str:
-    """Get the most recent brain entries, optionally filtered."""
+    """Get the most recent brain entries, optionally filtered.
+
+    source: filter by who wrote the entry (e.g. 'claude-code', 'jay').
+    """
     args = ["recent", "--limit", str(limit)]
     if kind:
         args += ["--kind", kind]
     if project:
         args += ["--project", project]
+    if source:
+        args += ["--source", source]
     if status:
         args += ["--status", status]
     if since:
@@ -231,6 +237,94 @@ def brain_boost(
 def brain_forget(entry_id: str) -> str:
     """Soft-delete a brain entry (sets expiry to now)."""
     return json.dumps(_run(["forget", entry_id]))
+
+
+# ── Entity management ──────────────────────────────────────────────
+
+
+@mcp.tool()
+def brain_add_entity(
+    slug: str,
+    kind: str,
+    name: str,
+    metadata: str = "",
+) -> str:
+    """Create a new entity (person, project, client, tool, place).
+
+    slug: unique id, e.g. 'alice' or 'my-project'.
+    metadata: optional JSON object string with arbitrary fields.
+    """
+    args = ["add-entity", "--id", slug, "--kind", kind, "--name", name]
+    if metadata:
+        args += ["--metadata", metadata]
+    return json.dumps(_run(args))
+
+
+@mcp.tool()
+def brain_update_entity(
+    slug: str,
+    name: str = "",
+    kind: str = "",
+    metadata: str = "",
+    merge_metadata: str = "",
+) -> str:
+    """Update an entity's fields or metadata.
+
+    metadata replaces the JSONB entirely; merge_metadata shallow-merges into
+    the existing object. Pass one or the other, not both.
+    """
+    args = ["update-entity", slug]
+    if name:
+        args += ["--name", name]
+    if kind:
+        args += ["--kind", kind]
+    if metadata:
+        args += ["--metadata", metadata]
+    if merge_metadata:
+        args += ["--merge-metadata", merge_metadata]
+    return json.dumps(_run(args))
+
+
+@mcp.tool()
+def brain_forget_entity(slug: str) -> str:
+    """Soft-delete an entity (sets deleted_at). Entry references stay valid."""
+    return json.dumps(_run(["forget-entity", slug]))
+
+
+# ── Event management ───────────────────────────────────────────────
+
+
+@mcp.tool()
+def brain_update_event(
+    event_id: str,
+    title: str = "",
+    starts_at: str = "",
+    ends_at: str = "",
+    location: str = "",
+    attendees: str = "",
+    notes: str = "",
+) -> str:
+    """Update an event's fields. attendees replaces the list."""
+    args = ["update-event", event_id]
+    if title:
+        args += ["--title", title]
+    if starts_at:
+        args += ["--starts-at", starts_at]
+    if ends_at:
+        args += ["--ends-at", ends_at]
+    if location:
+        args += ["--location", location]
+    if attendees:
+        args += ["--attendees", attendees]
+    if notes:
+        args += ["--notes", notes]
+    return json.dumps(_run(args))
+
+
+@mcp.tool()
+def brain_cancel_event(event_id: str) -> str:
+    """Cancel an event (soft-delete, sets deleted_at)."""
+    return json.dumps(_run(["cancel-event", event_id]))
 
 
 if __name__ == "__main__":
