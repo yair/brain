@@ -12,7 +12,9 @@
 ## Search
 
 ```bash
-brain --json search "query" [--kind KIND] [--project PROJECT] [--since SINCE] [--limit N]
+brain --json search "query" \
+  [--source CALLER] [--session-key SCENE] [--context INTENT] \
+  [--kind KIND] [--project PROJECT] [--by AUTHOR] [--since SINCE] [--limit N]
 ```
 
 Hybrid semantic + keyword search. Ranking: 70% vector similarity (Gemini
@@ -22,22 +24,40 @@ access_log.
 Each search returns a `retrieval_id` in JSON output. Use this with
 `brain boost --retrieval <rid> <positions>` to boost useful results.
 
+**Logging flags** — every returned entry is logged to `recall_log` via
+`log_recall()` so the dreaming pipeline can analyze recall patterns.
+
+- `--source` — caller identity, written into retrievals + recall_log.
+  Defaults to `cli`. AI agents should pass `--source claude-code`, `--source my-agent`, etc.
+- `--session-key` — OC-style scene key like `agent:main:telegram`,
+  `code:brain-repo`, `hook:mail-triage`. Stable semantic name for the
+  session/scene, **not** a raw UUID. Null if omitted.
+- `--context` — freeform intent description. Helps REM phase cluster
+  related searches. Null if omitted.
+
+**Filter flags** — narrow what search considers.
+
+- `--by AUTHOR` — filter by entry author (entries.source). Same flag as
+  `recent --by`. Use for "search X among entries Jay wrote".
+- `--kind`: decision, fact, todo, insight, observation, preference, debrief.
+- `--project`, `--since`, `--limit`: obvious.
+
 **--since** accepts relative ("3 days ago", "1 week ago", "yesterday",
 "today") or absolute ("2026-04-01", "2026-04-01 14:00") dates.
-
-**--kind** values: decision, fact, todo, insight, observation, preference,
-debrief.
 
 ## Recent
 
 ```bash
-brain --json recent [--kind KIND] [--status STATUS] [--project PROJECT] [--source SOURCE] [--since SINCE] [--limit N]
+brain --json recent [--kind KIND] [--status STATUS] [--project PROJECT] [--by AUTHOR] [--since SINCE] [--limit N]
 ```
 
 Returns entries ordered by creation time, newest first. Default limit: 10.
 
-**--source** filters by who wrote the entry — useful for "what has claude-code
-been up to?" or "what did Jay write recently?"
+**--by** filters by who wrote the entry (entries.source) — useful for
+"what has claude-code been up to?" or "what did Jay write recently?"
+Same semantics as `search --by`. The flag is `--by`, not `--source`,
+because `--source` across the CLI consistently means "who is calling
+this command" (write-side identity), not "filter records by author".
 
 ## Get
 

@@ -129,8 +129,8 @@ GPS coordinates with source, accuracy, and label.
 ### Reading
 
 ```bash
-brain search "query" [--kind K] [--project P] [--since S] [--limit N]
-brain recent [--kind K] [--status S] [--project P] [--source SRC] [--since S] [--limit N]
+brain search "query" [--source S] [--session-key K] [--context C] [--kind K] [--project P] [--by AUTHOR] [--since S] [--limit N]
+brain recent [--kind K] [--status S] [--project P] [--by AUTHOR] [--since S] [--limit N]
 brain get <entry-id>
 brain context <project>        # decisions + TODOs + entities + recent
 brain todos [--project P]

@@ -68,20 +68,44 @@ def brain_search(
     query: str,
     kind: str = "",
     project: str = "",
+    by: str = "",
     since: str = "",
     limit: int = 10,
+    session_key: str = "",
+    context: str = "",
 ) -> str:
     """Hybrid semantic + keyword search across brain entries.
 
-    Returns entries ranked by relevance (semantic similarity + keyword match + boost score).
+    Returns entries ranked by relevance (semantic similarity + keyword match
+    + boost score). Every returned entry is also logged to recall_log to feed
+    the dreaming pipeline's 6-signal scoring.
+
+    Fill in session_key and context when you can — they make dreaming's
+    analysis much more useful.
+
+    Args:
+        query: the search query (required).
+        kind, project, since, limit: filters.
+        by: filter by entry author (entries.source) — 'jay', 'claude-code', etc.
+        session_key: OC-style scene key like 'agent:main:telegram',
+            'code:brain-repo', 'hook:mail-triage'. Stable semantic name,
+            NOT a raw UUID. Leave empty if you genuinely don't have one.
+        context: freeform intent for this search ('debugging auth flow',
+            'looking for prior decisions on X'). Optional but useful.
     """
-    args = ["search", query, "--limit", str(limit)]
+    args = ["search", query, "--limit", str(limit), "--source", "claude-code"]
     if kind:
         args += ["--kind", kind]
     if project:
         args += ["--project", project]
+    if by:
+        args += ["--by", by]
     if since:
         args += ["--since", since]
+    if session_key:
+        args += ["--session-key", session_key]
+    if context:
+        args += ["--context", context]
     return json.dumps(_run(args))
 
 
@@ -89,22 +113,22 @@ def brain_search(
 def brain_recent(
     kind: str = "",
     project: str = "",
-    source: str = "",
+    by: str = "",
     status: str = "",
     since: str = "",
     limit: int = 10,
 ) -> str:
     """Get the most recent brain entries, optionally filtered.
 
-    source: filter by who wrote the entry (e.g. 'claude-code', 'jay').
+    by: filter by entry author (entries.source) — 'jay', 'claude-code', etc.
     """
     args = ["recent", "--limit", str(limit)]
     if kind:
         args += ["--kind", kind]
     if project:
         args += ["--project", project]
-    if source:
-        args += ["--source", source]
+    if by:
+        args += ["--by", by]
     if status:
         args += ["--status", status]
     if since:
@@ -142,11 +166,13 @@ def brain_events(from_date: str = "", to_date: str = "") -> str:
 
 
 @mcp.tool()
-def brain_todos(project: str = "") -> str:
-    """Get open TODO entries."""
+def brain_todos(project: str = "", by: str = "") -> str:
+    """Get open TODO entries. Optional: filter by project or by author ('by')."""
     args = ["todos"]
     if project:
         args += ["--project", project]
+    if by:
+        args += ["--by", by]
     return json.dumps(_run(args))
 
 

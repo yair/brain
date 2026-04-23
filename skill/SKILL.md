@@ -50,13 +50,31 @@ search or context dumps.
 
 **When you need past knowledge**, search before guessing:
 ```bash
-brain --json search "parser approach for large files"
+brain --json search "parser approach for large files" \
+  --source claude-code \
+  --session-key code:your-repo-name \
+  --context "investigating parser choice for current task"
 ```
 Search uses hybrid semantic + keyword ranking. If a result helps, boost it
 so it ranks higher next time:
 ```bash
 brain --json boost --retrieval <rid> 1 3 --source claude-code
 ```
+
+**About the search flags** — every search is logged to `recall_log` so the
+dreaming pipeline can analyze recall patterns. The more descriptive these
+flags are, the better dreaming can score and cluster:
+
+- `--source` — who's calling. Always `claude-code` from Claude Code sessions.
+- `--session-key` — an OC-style scene key: `agent:main:telegram`,
+  `code:brain-repo`, `hook:mail-triage`. Stable human-meaningful name, **not
+  a raw UUID**. Omit if you genuinely don't have one.
+- `--context` — freeform description of *why* you're searching
+  ("debugging the token refresh bug", "looking for prior X decision").
+
+Missing any of these just means `NULL` in the log — never breaks search.
+But filling them in is one of the cheapest forms of help you can give
+future sessions.
 
 ## Always use --json
 
@@ -68,8 +86,8 @@ always pass `--json` so output is structured and parseable.
 | Task | Command |
 |------|---------|
 | Project context | `brain --json context <project>` |
-| Search | `brain --json search "query" [--kind K] [--project P] [--limit N]` |
-| Recent entries | `brain --json recent [--kind K] [--status S] [--project P] [--source S] [--since S]` |
+| Search | `brain --json search "query" --source claude-code [--session-key K] [--context C] [--kind K] [--project P] [--by AUTHOR] [--limit N]` |
+| Recent entries | `brain --json recent [--kind K] [--status S] [--project P] [--by AUTHOR] [--since S]` |
 | Get by ID | `brain --json get <uuid>` |
 | Open TODOs | `brain --json todos [--project P]` |
 | All entities | `brain --json entities [--include-deleted]` |

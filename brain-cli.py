@@ -284,11 +284,12 @@ def stats(ctx):
 @click.option("--kind", help="Filter by entry kind (decision, fact, todo, ...)")
 @click.option("--status", help="Filter by status (active, superseded, expired, deleted)")
 @click.option("--project", help="Filter by project slug")
-@click.option("--source", help="Filter by source (who wrote it: claude-code, jay, ...)")
+@click.option("--by", "by_source",
+              help="Filter by the entry author (entries.source): 'jay', 'claude-code', ...")
 @click.option("--since", help="Entries since (e.g. '3 days ago', '2026-01-01')")
 @click.option("--limit", default=10, help="Max results (default: 10)")
 @click.pass_context
-def recent(ctx, kind, status, project, source, since, limit):
+def recent(ctx, kind, status, project, by_source, since, limit):
     """Show recent entries, newest first."""
     conn = get_conn(ctx.obj["db"])
     cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
@@ -303,9 +304,9 @@ def recent(ctx, kind, status, project, source, since, limit):
     if project:
         conditions.append("project = %s")
         params.append(project)
-    if source:
+    if by_source:
         conditions.append("source = %s")
-        params.append(source)
+        params.append(by_source)
     since_dt = parse_since(since)
     if since_dt:
         conditions.append("created_at >= %s")
@@ -328,11 +329,29 @@ def recent(ctx, kind, status, project, source, since, limit):
 @click.argument("query")
 @click.option("--kind", help="Filter by entry kind")
 @click.option("--project", help="Filter by project slug")
+@click.option("--by", "by_source",
+              help="Filter by entry author (entries.source): 'jay', 'claude-code', ...")
 @click.option("--since", help="Entries since (e.g. '3 days ago')")
 @click.option("--limit", default=10, help="Max results (default: 10)")
+@click.option("--source", default="cli",
+              help="Who is performing the search (e.g. 'claude-code', 'jay'). "
+                   "Stored in retrievals + recall_log for dreaming's analysis.")
+@click.option("--session-key", "session_key",
+              help="OC-style scene key: 'agent:main:telegram', 'code:brain-repo', 'hook:foo'. "
+                   "NOT a raw UUID — prefer stable semantic names.")
+@click.option("--context", "context_hint",
+              help="Freeform intent for this search (e.g. 'debugging X'). "
+                   "Helps dreaming's pattern analysis.")
 @click.pass_context
-def search(ctx, query, kind, project, since, limit):
-    """Hybrid semantic + keyword search (returns retrieval_id for boost)."""
+def search(ctx, query, kind, project, by_source, since, limit, source, session_key, context_hint):
+    """Hybrid semantic + keyword search (returns retrieval_id for boost).
+
+    Every returned entry is also logged to recall_log via log_recall() —
+    this feeds the 6-signal scoring that dreaming uses to promote, merge,
+    and expire entries. The more accurate --source, --session-key, and
+    --context are, the better dreaming can attribute recall patterns to
+    real usage.
+    """
     conn = get_conn(ctx.obj["db"])
     cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
 
@@ -345,6 +364,9 @@ def search(ctx, query, kind, project, since, limit):
     if project:
         conditions.append("project = %s")
         params.append(project)
+    if by_source:
+        conditions.append("source = %s")
+        params.append(by_source)
     since_dt = parse_since(since)
     if since_dt:
         conditions.append("created_at >= %s")
@@ -403,9 +425,24 @@ def search(ctx, query, kind, project, since, limit):
         cur2 = conn.cursor()
         cur2.execute(
             "INSERT INTO retrievals (query, result_ids, source) VALUES (%s, %s, %s) RETURNING id",
-            [query, result_ids, ctx.obj.get("source", "cli")],
+            [query, result_ids, source],
         )
         retrieval_id = cur2.fetchone()[0]
+        conn.commit()
+
+        # Phase 0: log each returned entry to recall_log via the
+        # SECURITY DEFINER function. Best-effort — never break search.
+        for rank_i, r in enumerate(rows, start=1):
+            try:
+                cur2.execute(
+                    "SELECT log_recall(%s, %s, %s, %s, %s, %s, %s)",
+                    [r["id"], query, rank_i, float(r.get("relevance") or 0.0),
+                     session_key, source, context_hint],
+                )
+            except psycopg2.Error as e:
+                click.echo(f"Warning: log_recall failed for rank {rank_i}: {e}", err=True)
+                conn.rollback()
+                # Re-open transaction for subsequent iterations
         conn.commit()
 
     conn.close()
@@ -732,11 +769,13 @@ def cancel_event(ctx, event_id):
 
 @cli.command()
 @click.option("--project", help="Filter by project slug")
+@click.option("--by", "by_source",
+              help="Filter by TODO author (entries.source)")
 @click.pass_context
-def todos(ctx, project):
+def todos(ctx, project, by_source):
     """Show open TODOs (shortcut for: recent --kind todo --status active)."""
     ctx.invoke(recent, kind="todo", status="active", project=project,
-               source=None, since=None, limit=50)
+               by_source=by_source, since=None, limit=50)
 
 
 # ── where (location) ─────────────────────────────────────────────────
