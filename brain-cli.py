@@ -1238,5 +1238,312 @@ def boost_history(ctx, entry_id, limit):
                        f"(last: {r['last_boosted']:%Y-%m-%d %H:%M})")
 
 
+# ── consolidation: approve / deny / defer / escalate ────────────────
+
+
+def _resolve_proposal(conn, prefix_or_id: str) -> dict:
+    """Look up a proposal by full UUID or unique prefix. Exit on miss/ambiguity."""
+    cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+    cur.execute(
+        """
+        SELECT id::text, cluster_entry_ids::text[] AS cluster,
+               yoko_proposal, ringo_review,
+               action, status,
+               yoko_model, ringo_model, created_at
+        FROM consolidation_proposals
+        WHERE id::text LIKE %s
+        """,
+        [prefix_or_id + "%"],
+    )
+    rows = cur.fetchall()
+    if not rows:
+        click.echo(f"No proposal matching '{prefix_or_id}'.", err=True)
+        sys.exit(1)
+    if len(rows) > 1:
+        ids = ", ".join(r["id"][:12] for r in rows)
+        click.echo(f"Ambiguous prefix '{prefix_or_id}' matches {len(rows)}: {ids}",
+                   err=True)
+        sys.exit(1)
+    return rows[0]
+
+
+def _log_transition(cur, proposal_id: str, from_status: str | None,
+                    to_status: str, actor: str, note: str | None,
+                    payload: dict | None = None):
+    cur.execute(
+        """
+        INSERT INTO consolidation_log
+            (proposal_id, from_status, to_status, actor, note, payload)
+        VALUES (%s, %s::consolidation_status, %s::consolidation_status,
+                %s, %s, %s::jsonb)
+        """,
+        [proposal_id, from_status, to_status, actor, note,
+         json.dumps(payload) if payload else None],
+    )
+
+
+def _apply_proposal(cur, proposal: dict) -> dict:
+    """Perform the mutation for an approved proposal.
+
+    Returns a dict describing what was applied (goes into consolidation_log
+    as payload). Raises on apply failure — caller rolls back, records
+    apply_error.
+    """
+    action = proposal["action"]
+    args = proposal["yoko_proposal"].get("action_args") or {}
+
+    if action == "merge-supersede":
+        new = args.get("new_entry") or {}
+        # Fallback: derive source from cluster if Yoko didn't set it.
+        # (Older proposals predate the prompt change that requires source.)
+        if not new.get("source"):
+            cur.execute(
+                "SELECT DISTINCT source FROM entries "
+                "WHERE id = ANY(%s::uuid[]) AND source IS NOT NULL",
+                [proposal["cluster"]],
+            )
+            srcs = [r["source"] for r in cur.fetchall()]
+            new["source"] = srcs[0] if len(srcs) == 1 else (
+                ",".join(sorted(srcs)) if srcs else None
+            )
+        # Embed title + body so the merged entry participates in search.
+        emb = generate_embedding(f"{new.get('title','')} {new.get('body','')}")
+        cur.execute(
+            """
+            INSERT INTO entries (kind, source, title, body, tags, project,
+                                 entity_refs, embedding, status, confidence)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            RETURNING id
+            """,
+            [
+                new.get("kind"),
+                new.get("source"),
+                new.get("title"),
+                new.get("body"),
+                new.get("tags") or [],
+                new.get("project"),
+                new.get("entity_refs") or [],
+                ("[" + ",".join(str(x) for x in emb) + "]") if emb else None,
+                new.get("status") or "active",
+                new.get("confidence") if new.get("confidence") is not None else 1.0,
+            ],
+        )
+        new_id = cur.fetchone()["id"]
+        supersede_ids = args.get("supersede_ids") or []
+        if supersede_ids:
+            cur.execute(
+                "UPDATE entries SET superseded_by = %s "
+                "WHERE id = ANY(%s::uuid[])",
+                [new_id, supersede_ids],
+            )
+        return {"action": action, "new_entry_id": str(new_id),
+                "superseded": supersede_ids}
+
+    if action == "update-status":
+        cur.execute(
+            "UPDATE entries SET status = %s WHERE id = %s",
+            [args.get("new_status"), args.get("entry_id")],
+        )
+        return {"action": action, "entry_id": args.get("entry_id"),
+                "new_status": args.get("new_status")}
+
+    if action == "fix-metadata":
+        field = args.get("field")
+        if field not in ("project", "source", "tags"):
+            raise RuntimeError(f"fix-metadata: refusing to update field '{field}'")
+        new_value = args.get("new_value")
+        cur.execute(
+            f"UPDATE entries SET {field} = %s WHERE id = %s",
+            [new_value, args.get("entry_id")],
+        )
+        return {"action": action, "entry_id": args.get("entry_id"),
+                "field": field, "new_value": new_value}
+
+    # no-action, flag-contradiction, defer-to-human: no DB mutation.
+    # Approving them is just acknowledgement.
+    return {"action": action, "mutation": "none"}
+
+
+def _decide(ctx, prefix_or_id: str, new_status: str, note: str | None,
+            source: str, apply: bool):
+    """Shared body of approve/deny/defer/escalate."""
+    conn = get_conn(ctx.obj["db"])
+    cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+
+    p = _resolve_proposal(conn, prefix_or_id)
+    pid = p["id"]
+    if p["status"] != "pending":
+        click.echo(f"Proposal {pid[:8]} is {p['status']}, not pending — refusing.",
+                   err=True)
+        sys.exit(1)
+
+    # Always record the human decision first.
+    cur.execute(
+        """
+        UPDATE consolidation_proposals
+           SET status = %s::consolidation_status,
+               decided_at = now(),
+               decided_by = %s,
+               decision_note = %s
+         WHERE id = %s
+        """,
+        [new_status, source, note, pid],
+    )
+    _log_transition(cur, pid, "pending", new_status, source, note)
+
+    payload = None
+    if apply:
+        try:
+            payload = _apply_proposal(cur, p)
+            cur.execute(
+                """
+                UPDATE consolidation_proposals
+                   SET status = 'applied'::consolidation_status,
+                       applied_at = now(),
+                       apply_error = NULL
+                 WHERE id = %s
+                """,
+                [pid],
+            )
+            _log_transition(cur, pid, new_status, "applied", source,
+                            "auto-apply on approve", payload)
+        except Exception as e:
+            conn.rollback()
+            # Re-record the human decision (the rollback nuked it) with apply_error.
+            cur.execute(
+                """
+                UPDATE consolidation_proposals
+                   SET status = %s::consolidation_status,
+                       decided_at = now(),
+                       decided_by = %s,
+                       decision_note = %s,
+                       apply_error = %s
+                 WHERE id = %s
+                """,
+                [new_status, source, note, str(e), pid],
+            )
+            _log_transition(cur, pid, "pending", new_status, source,
+                            f"apply failed: {e}")
+            conn.commit()
+            conn.close()
+            click.echo(f"Proposal {pid[:8]} marked {new_status} but apply failed: {e}",
+                       err=True)
+            sys.exit(1)
+
+    conn.commit()
+    conn.close()
+
+    result = {"id": pid, "status": "applied" if apply else new_status,
+              "action": p["action"]}
+    if payload:
+        result["applied"] = payload
+    if ctx.obj["json"]:
+        click.echo(json.dumps(result, default=str))
+    else:
+        verb = "Applied" if apply else new_status.title()
+        click.echo(f"{verb} proposal {pid[:8]} ({p['action']}).")
+
+
+_DECIDE_OPTS = [
+    click.option("--note", default=None, help="Free-text note logged with the decision."),
+    click.option("--source", default=os.environ.get("USER", "cli"),
+                 help="Who made the decision (default: $USER)."),
+]
+
+
+def _decide_opts(fn):
+    for opt in reversed(_DECIDE_OPTS):
+        fn = opt(fn)
+    return fn
+
+
+@cli.command()
+@click.argument("proposal_id")
+@_decide_opts
+@click.pass_context
+def approve(ctx, proposal_id, note, source):
+    """Approve a consolidation proposal and apply its mutation."""
+    _decide(ctx, proposal_id, "approved", note, source, apply=True)
+
+
+@cli.command()
+@click.argument("proposal_id")
+@_decide_opts
+@click.pass_context
+def deny(ctx, proposal_id, note, source):
+    """Reject a consolidation proposal — no mutation, marks denied."""
+    _decide(ctx, proposal_id, "denied", note, source, apply=False)
+
+
+@cli.command()
+@click.argument("proposal_id")
+@_decide_opts
+@click.pass_context
+def defer(ctx, proposal_id, note, source):
+    """Defer a proposal — keeps it from auto-staling against same cluster."""
+    _decide(ctx, proposal_id, "deferred", note, source, apply=False)
+
+
+@cli.command()
+@click.argument("proposal_id")
+@_decide_opts
+@click.pass_context
+def escalate(ctx, proposal_id, note, source):
+    """Escalate a proposal for deeper investigation."""
+    _decide(ctx, proposal_id, "escalated", note, source, apply=False)
+
+
+@cli.command()
+@click.option("--status", default="pending",
+              help="Filter by status (default: pending). Use 'all' for everything.")
+@click.option("--limit", type=int, default=50)
+@click.pass_context
+def proposals(ctx, status, limit):
+    """List consolidation proposals."""
+    conn = get_conn(ctx.obj["db"])
+    cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+    if status == "all":
+        cur.execute(
+            """
+            SELECT id::text, action, status, issue_confidence,
+                   resolution_confidence, agreement, thoroughness,
+                   array_length(cluster_entry_ids, 1) AS cluster_size,
+                   created_at, decided_at, applied_at
+            FROM consolidation_proposals
+            ORDER BY created_at DESC LIMIT %s
+            """,
+            [limit],
+        )
+    else:
+        cur.execute(
+            """
+            SELECT id::text, action, status, issue_confidence,
+                   resolution_confidence, agreement, thoroughness,
+                   array_length(cluster_entry_ids, 1) AS cluster_size,
+                   created_at, decided_at, applied_at
+            FROM consolidation_proposals
+            WHERE status = %s::consolidation_status
+            ORDER BY created_at DESC LIMIT %s
+            """,
+            [status, limit],
+        )
+    rows = cur.fetchall()
+    conn.close()
+
+    if ctx.obj["json"]:
+        click.echo(json.dumps([dict(r) for r in rows], default=str))
+        return
+    if not rows:
+        click.echo(f"No proposals with status='{status}'.")
+        return
+    for r in rows:
+        click.echo(
+            f"{r['id'][:8]}  {r['status']:<12}  {r['action']:<18}  "
+            f"cluster={r['cluster_size']}  "
+            f"issue={r['issue_confidence']} agree={r['agreement']}  "
+            f"{r['created_at']:%Y-%m-%d %H:%M}"
+        )
+
+
 if __name__ == "__main__":
     cli()
