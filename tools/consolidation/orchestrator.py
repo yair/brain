@@ -169,6 +169,27 @@ def fetch_overlapping_pending(conn, ids: list[str]):
     return cur.fetchall()
 
 
+def find_identical_pending(conn, ids: list[str]) -> str | None:
+    """Return the id of a pending/deferred proposal whose cluster is the
+    EXACT same set as `ids` (order-independent). Used to skip re-running
+    Yoko/Ringo on clusters that already have an unresolved proposal.
+    """
+    cur = conn.cursor()
+    cur.execute(
+        """
+        SELECT id::text
+        FROM consolidation_proposals
+        WHERE status IN ('pending', 'deferred')
+          AND cluster_entry_ids @> %s::uuid[]
+          AND cluster_entry_ids <@ %s::uuid[]
+        LIMIT 1
+        """,
+        [ids, ids],
+    )
+    row = cur.fetchone()
+    return row[0] if row else None
+
+
 def stale_old_proposal(conn, old_id: str, new_id: str):
     cur = conn.cursor()
     cur.execute(
@@ -415,32 +436,10 @@ def render_markdown(conn, output_path: Path, db_name: str):
     lines: list[str] = []
     lines.append(f"# Consolidation review — {db_name} — {datetime.now().date()}")
     lines.append("")
-    lines.append(f"{len(rows)} pending proposal(s).")
-    lines.append("")
-    lines.append("## How to read this file")
-    lines.append("")
-    lines.append("Each proposal shows the full source entries, Yoko's proposed action, "
-                 "and Ringo's critique. Decide each with one of:")
-    lines.append("")
-    lines.append("- `brain approve <id>` — apply the proposal")
-    lines.append("- `brain deny <id>` — reject (won't be re-proposed for the same cluster)")
-    lines.append("- `brain defer <id>` — skip (may re-propose if the cluster changes)")
-    lines.append("- `brain escalate <id>` — flag for deeper investigation")
-    lines.append("")
-    lines.append("**Confidence scales** (all on 0..1):")
-    lines.append("")
-    lines.append("- Yoko's `issue_confidence` — how sure Yoko is that *something* in the "
-                 "cluster needs change.")
-    lines.append("- Yoko's `resolution_confidence` — how sure Yoko is that *her specific "
-                 "proposed action* is the right fix.")
-    lines.append("- Ringo's `agreement` — how much Ringo agrees with Yoko's chosen action.")
-    lines.append("- Ringo's `thoroughness` — how thoroughly Ringo thinks Yoko investigated.")
-    lines.append("")
-    lines.append("**Ringo's objection severity:**")
-    lines.append("")
-    lines.append("- `low` — minor concern; proposal likely still fine if approved.")
-    lines.append("- `medium` — concern that merits a second look before approving.")
-    lines.append("- `high` — proposal should likely be denied or escalated.")
+    lines.append(f"{len(rows)} pending proposal(s). "
+                 "Decide with `brain approve|deny|defer|escalate <id>`. "
+                 "Score scales: confidences and agreement/thoroughness on 0..1; "
+                 "objection severity is low/medium/high.")
     lines.append("")
 
     for r in rows:
@@ -646,7 +645,12 @@ def _render_proposal(cur, r: dict) -> list[str]:
         L.append("")
 
     # ── Yoko's proposal ────────────────────────────────────────────
+    # Order: WHAT (action + new_entry) → WHY (reasoning) → caveats
+    # (uncertainties) → support (evidence). Lets the reader see the
+    # change before they have to judge the reasoning.
     L.append("### Yoko proposes")
+    L.append("")
+    L.extend(_render_action_args(r["action"], yoko.get("action_args") or {}))
     L.append("")
     L.append("Reasoning:")
     L.append("")
@@ -657,8 +661,6 @@ def _render_proposal(cur, r: dict) -> list[str]:
         L.append("")
         L.extend(_blockquote(yoko["uncertainties"]))
         L.append("")
-    L.extend(_render_action_args(r["action"], yoko.get("action_args") or {}))
-    L.append("")
     L.append("Evidence Yoko gathered:")
     L.append("")
     L.extend(_render_evidence(yoko.get("evidence") or []))
@@ -766,11 +768,21 @@ def main():
 
     fail_count = 0
     success_count = 0
+    skip_count = 0
     for i, cluster in enumerate(clusters, start=1):
         print(f"\n=== Cluster {i}/{len(clusters)} ({len(cluster)} entries) ===")
         entries = fetch_entries(conn, cluster)
         for e in entries:
             print(f"  - [{e['kind']}] {e['title']}")
+
+        # Skip if this exact cluster is already covered by an unresolved
+        # proposal. We only burn agent turns when the cluster has
+        # actually changed (different members).
+        existing = find_identical_pending(conn, cluster)
+        if existing:
+            print(f"  → skip: already covered by pending proposal {existing[:8]}")
+            skip_count += 1
+            continue
 
         overlap = fetch_overlapping_pending(conn, cluster)
         for old in overlap:
@@ -804,7 +816,8 @@ def main():
             fail_count += 1
             print(f"  ✗ failed: {e}", file=sys.stderr)
 
-    print(f"\nDone. {success_count} succeeded, {fail_count} failed.")
+    print(f"\nDone. {success_count} succeeded, {fail_count} failed, "
+          f"{skip_count} skipped (already covered).")
 
     render_markdown(conn, output_path, args.db)
     print(f"Rendered → {output_path}")

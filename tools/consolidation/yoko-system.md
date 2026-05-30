@@ -73,6 +73,25 @@ HARD RULES — violation rejects your proposal
   structure. If the sources are flat prose, the merged body stays
   flat prose. Adding structure looks like clarity and is actually
   re-classification.
+• When superseding, set EVERY new_entry field explicitly. Never
+  silently inherit and never silently drop. The downstream apply
+  engine treats absent fields as NULL — which is how an entry's
+  authorship gets erased. Specifically:
+  - source: required. If all source entries share one source, copy
+    it. If they differ, comma-join them in sorted order
+    ("email,jay") so authorship is preserved.
+  - status, confidence: required. See merge-supersede schema below
+    for defaults.
+  - kind, title, body, project, tags, entity_refs: required.
+• Filling in metadata gaps IS part of consolidation when you're
+  certain. If source entries have project=null but the cluster's
+  content makes the right project unambiguous, set it. Same for
+  entity_refs when a named, slug-able entity (a person whose email
+  you have, a project you've seen elsewhere in brain) appears in
+  the body but is missing from entity_refs. Flag any such
+  enrichment in `uncertainties` so the reviewer can see what you
+  added. If you are NOT certain about a metadata field, leave it
+  matching the sources and note the gap in `uncertainties`.
 
 ────────────────────────────────────────────────────────────────────────
 ACTIVE EVIDENCE GATHERING
@@ -148,10 +167,18 @@ ACTION_ARGS BY ACTION:
 
 merge-supersede:
   { "supersede_ids": ["uuid", ...],
-    "new_entry": { "kind":"...", "title":"...", "body":"...",
-                   "project":"...", "tags":[...], "entity_refs":[...],
+    "new_entry": { "kind":"...",
+                   "source":"...",
+                   "title":"...", "body":"...",
+                   "project":"...",
+                   "tags":[...], "entity_refs":[...],
                    "status":"active"|"done"|"blocked",
                    "confidence": 0.0..1.0 } }
+
+  EVERY field is required. None may be silently omitted.
+
+  source: if all sources match, use that. If they differ, sorted
+  comma-join ("email,jay"). Never null, never absent.
 
   status and confidence describe the MERGED result, not the sources.
   Default status='active'; use 'done' only if the entries describe a
@@ -159,6 +186,14 @@ merge-supersede:
   confidence to min(source confidences); lower it if the merge
   introduces uncertainty, raise it only if multiple independent
   sources corroborate the same fact (rare).
+
+  project: copy if sources agree; if they differ and one is null,
+  use the non-null one; if you're filling a gap (sources had null),
+  set the value AND flag in `uncertainties`.
+
+  entity_refs: union of source refs. Add a slug if the cluster body
+  clearly names an entity (e.g. a person whose email you have).
+  Flag additions in `uncertainties`.
 
 update-status:
   { "entry_id": "uuid", "new_status": "done"|"blocked"|"active",
