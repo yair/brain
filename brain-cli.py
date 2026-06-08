@@ -2,6 +2,7 @@
 """brain-cli — CLI for the brain shared memory database."""
 
 import json
+import re
 import sys
 import uuid
 from datetime import datetime, timedelta, timezone
@@ -91,6 +92,50 @@ def parse_metadata(s: str | None) -> dict | None:
         click.echo("Error: --metadata must be a JSON object", err=True)
         sys.exit(2)
     return val
+
+
+# Hex chars + optional hyphens. Used to validate a UUID prefix before
+# composing it into a LIKE pattern — prevents wildcards (% _) or stray
+# characters reaching the SELECT.
+_UUID_PREFIX_RE = re.compile(r"^[0-9a-f]+(-[0-9a-f]*)*$", re.IGNORECASE)
+
+
+def resolve_uuid_prefix(conn, table: str, prefix_or_full: str) -> str:
+    """Resolve a UUID prefix or full UUID against `table.id`, return the
+    full UUID string. Exits 1 on invalid format, no match, or ambiguity.
+
+    `table` is whitelisted because it goes into the SQL unparameterised.
+    """
+    nouns = {"entries": "entry", "events": "event"}
+    if table not in nouns:
+        raise ValueError(f"resolve_uuid_prefix: unknown table {table!r}")
+    s = (prefix_or_full or "").strip().lower()
+    if len(s) < 4 or not _UUID_PREFIX_RE.match(s):
+        click.echo(
+            f"Error: '{prefix_or_full}' is not a valid UUID or prefix "
+            "(need ≥4 hex characters, optional hyphens).",
+            err=True,
+        )
+        sys.exit(1)
+    cur = conn.cursor()
+    cur.execute(
+        f"SELECT id::text FROM {table} WHERE id::text LIKE %s",
+        [s + "%"],
+    )
+    rows = cur.fetchall()
+    if not rows:
+        click.echo(f"Error: no {nouns[table]} matches id '{s}'.", err=True)
+        sys.exit(1)
+    if len(rows) > 1:
+        sample = ", ".join(r[0][:12] for r in rows[:5])
+        more = "" if len(rows) <= 5 else f" (and {len(rows) - 5} more)"
+        click.echo(
+            f"Error: ambiguous prefix '{s}' matches {len(rows)} {table}: "
+            f"{sample}{more}. Use more characters to disambiguate.",
+            err=True,
+        )
+        sys.exit(1)
+    return rows[0][0]
 
 
 def generate_embedding(text: str) -> list[float] | None:
@@ -475,15 +520,13 @@ def search(ctx, query, kind, project, by_source, since, limit, source, session_k
 @click.argument("entry_id")
 @click.pass_context
 def get(ctx, entry_id):
-    """Get a single entry by UUID."""
+    """Get a single entry by UUID (full or unambiguous prefix)."""
     conn = get_conn(ctx.obj["db"])
+    entry_id = resolve_uuid_prefix(conn, "entries", entry_id)
     cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
     cur.execute("SELECT * FROM entries WHERE id = %s", [entry_id])
     row = cur.fetchone()
     conn.close()
-    if not row:
-        click.echo(f"Entry {entry_id} not found.", err=True)
-        sys.exit(1)
     output_results([row], format_entry, ctx.obj["json"], ctx.obj["quiet"], ctx.obj["full"])
 
 
@@ -722,16 +765,14 @@ def update_event(ctx, event_id, title, starts_at, ends_at, loc, attendees, notes
         click.echo("Nothing to update.", err=True)
         sys.exit(2)
 
-    params.append(event_id)
     conn = get_conn(ctx.obj["db"])
+    event_id = resolve_uuid_prefix(conn, "events", event_id)
+    params.append(event_id)
     cur = conn.cursor()
     cur.execute(
         f"UPDATE events SET {', '.join(updates)} WHERE id = %s",
         params,
     )
-    if cur.rowcount == 0:
-        click.echo(f"Event {event_id} not found.", err=True)
-        sys.exit(1)
     conn.commit()
     conn.close()
     if ctx.obj["json"]:
@@ -748,11 +789,12 @@ def update_event(ctx, event_id, title, starts_at, ends_at, loc, attendees, notes
 def cancel_event(ctx, event_id):
     """Soft-delete / cancel an event (sets deleted_at)."""
     conn = get_conn(ctx.obj["db"])
+    event_id = resolve_uuid_prefix(conn, "events", event_id)
     cur = conn.cursor()
     cur.execute("UPDATE events SET deleted_at = now() WHERE id = %s AND deleted_at IS NULL",
                 [event_id])
     if cur.rowcount == 0:
-        click.echo(f"Event {event_id} not found (or already cancelled).", err=True)
+        click.echo(f"Event {event_id} is already cancelled.", err=True)
         sys.exit(1)
     conn.commit()
     conn.close()
@@ -951,6 +993,7 @@ def update(ctx, entry_id, status, body, confidence, title):
         sys.exit(2)
 
     conn = get_conn(ctx.obj["db"])
+    entry_id = resolve_uuid_prefix(conn, "entries", entry_id)
     cur = conn.cursor()
 
     set_clauses = []
@@ -964,9 +1007,6 @@ def update(ctx, entry_id, status, body, confidence, title):
         f"UPDATE entries SET {', '.join(set_clauses)} WHERE id = %s",
         params,
     )
-    if cur.rowcount == 0:
-        click.echo(f"Entry {entry_id} not found.", err=True)
-        sys.exit(1)
     conn.commit()
     conn.close()
 
@@ -990,13 +1030,11 @@ def update(ctx, entry_id, status, body, confidence, title):
 def supersede(ctx, old_id, title, body, source):
     """Replace an entry with a new one. Old entry gets superseded_by set."""
     conn = get_conn(ctx.obj["db"])
+    old_id = resolve_uuid_prefix(conn, "entries", old_id)
     cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
 
     cur.execute("SELECT * FROM entries WHERE id = %s", [old_id])
     old = cur.fetchone()
-    if not old:
-        click.echo(f"Entry {old_id} not found.", err=True)
-        sys.exit(1)
 
     emb = generate_embedding(f"{title} {body}")
 
@@ -1034,11 +1072,9 @@ def supersede(ctx, old_id, title, body, source):
 def forget(ctx, entry_id):
     """Soft-delete an entry (sets expires_at to now)."""
     conn = get_conn(ctx.obj["db"])
+    entry_id = resolve_uuid_prefix(conn, "entries", entry_id)
     cur = conn.cursor()
     cur.execute("UPDATE entries SET expires_at = now() WHERE id = %s", [entry_id])
-    if cur.rowcount == 0:
-        click.echo(f"Entry {entry_id} not found.", err=True)
-        sys.exit(1)
     conn.commit()
     conn.close()
 
@@ -1094,6 +1130,7 @@ def embed(ctx, entry_id, embed_all, missing):
     cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
 
     if entry_id:
+        entry_id = resolve_uuid_prefix(conn, "entries", entry_id)
         cur.execute("SELECT id, title, body FROM entries WHERE id = %s", [entry_id])
         rows = cur.fetchall()
     elif embed_all:

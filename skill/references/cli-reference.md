@@ -65,7 +65,11 @@ this command" (write-side identity), not "filter records by author".
 brain --json get <entry-id>
 ```
 
-Fetch a single entry by UUID. Partial UUID prefixes work.
+Fetch a single entry by UUID. Partial prefixes (≥4 hex chars) work as
+long as they're unambiguous — same convention as `git`. This applies
+across the CLI: `get`, `update`, `supersede`, `forget`, `embed`,
+`update-event`, `cancel-event`, and the consolidation
+`approve/deny/defer/escalate` commands all accept a prefix.
 
 ## Context
 
