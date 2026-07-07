@@ -193,6 +193,22 @@ Creates a new entry inheriting kind/project/tags from the old one, and
 sets `superseded_by` on the old entry. Use when an entry needs substantial
 revision rather than a minor update.
 
+## Merge entries
+
+```bash
+brain --json merge-entries --supersede <id> --supersede <id> [...] \
+  --kind K --title T --body B --source S \
+  [--project P] [--tags T] [--entity-refs E] [--status S] [--confidence C]
+```
+
+Atomic N-to-1 merge: creates one new entry and marks every listed
+original as superseded by it, in a single transaction. Refuses entries
+that are already superseded or soft-deleted, and requires at least two
+`--supersede`. Unlike `supersede` (1-to-1, inherits fields), every field
+of the merged entry is explicit — with N originals there is no single
+source of truth to inherit from. Built for the consolidation pipeline's
+apply step; usable by hand.
+
 ## Forget
 
 ```bash

@@ -1063,6 +1063,104 @@ def supersede(ctx, old_id, title, body, source):
         click.echo(f"Superseded {old_id} → {new_id}")
 
 
+# ── merge-entries ────────────────────────────────────────────────────
+
+
+@cli.command("merge-entries")
+@click.option("--supersede", "supersede_ids", multiple=True, required=True,
+              help="Entry to supersede (UUID or prefix). Repeat per entry; "
+                   "at least two.")
+@click.option("--kind", required=True,
+              help="Kind of the merged entry (decision, fact, todo, ...)")
+@click.option("--title", required=True, help="Merged entry title")
+@click.option("--body", required=True, help="Merged entry body")
+@click.option("--source", required=True,
+              help="Source of the merged entry. If the originals agree, "
+                   "use theirs; if they differ, sorted comma-join "
+                   "('email,jay'). Explicit on purpose — no silent default.")
+@click.option("--project", default=None, help="Project slug (optional)")
+@click.option("--tags", default=None, help="Comma-separated tags")
+@click.option("--entity-refs", default=None, help="Comma-separated entity slugs")
+@click.option("--status", default="active", help="Status (default: active)")
+@click.option("--confidence", type=float, default=1.0,
+              help="Confidence 0..1 (default: 1.0)")
+@click.pass_context
+def merge_entries(ctx, supersede_ids, kind, title, body, source, project,
+                  tags, entity_refs, status, confidence):
+    """Atomic N-to-1 merge: create one new entry and mark every listed
+    original as superseded by it, in a single transaction.
+
+    Built for the dreaming pipeline's merge-supersede action (the engine
+    brain-change apply handler shells out to this), but usable by hand.
+    Unlike 'supersede' (1-to-1, inherits fields from the original), every
+    field of the merged entry is explicit — with N originals there is no
+    single source of truth to inherit from.
+    """
+    if len(supersede_ids) < 2:
+        click.echo("Error: --supersede must be given at least twice "
+                   "(N-to-1 merge). For 1-to-1 use 'supersede'.", err=True)
+        sys.exit(2)
+
+    conn = get_conn(ctx.obj["db"])
+    resolved = [resolve_uuid_prefix(conn, "entries", s) for s in supersede_ids]
+    if len(set(resolved)) != len(resolved):
+        click.echo("Error: duplicate entries in --supersede list.", err=True)
+        sys.exit(2)
+
+    cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+    # Refuse to merge entries that are already superseded or expired —
+    # a double-merge silently forks history.
+    cur.execute(
+        "SELECT id::text, title, superseded_by::text, expires_at "
+        "FROM entries WHERE id = ANY(%s::uuid[])",
+        [resolved],
+    )
+    for r in cur.fetchall():
+        if r["superseded_by"]:
+            click.echo(f"Error: {r['id'][:8]} ({r['title'][:40]}) is already "
+                       f"superseded by {r['superseded_by'][:8]}.", err=True)
+            sys.exit(1)
+        if r["expires_at"]:
+            click.echo(f"Error: {r['id'][:8]} ({r['title'][:40]}) is "
+                       "soft-deleted (expires_at set).", err=True)
+            sys.exit(1)
+
+    tag_list = [t.strip() for t in tags.split(",")] if tags else []
+    ref_list = [r.strip() for r in entity_refs.split(",")] if entity_refs else []
+    emb = generate_embedding(f"{title} {body}")
+
+    cur.execute(
+        """
+        INSERT INTO entries (kind, source, title, body, tags, project,
+                             entity_refs, embedding, status, confidence)
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+        RETURNING id
+        """,
+        [kind, source, title, body, tag_list, project, ref_list,
+         "[" + ",".join(str(x) for x in emb) + "]" if emb else None,
+         status, confidence],
+    )
+    new_id = cur.fetchone()["id"]
+    cur.execute(
+        "UPDATE entries SET superseded_by = %s WHERE id = ANY(%s::uuid[])",
+        [new_id, resolved],
+    )
+    conn.commit()
+    conn.close()
+
+    result = {"new_id": str(new_id), "superseded": resolved,
+              "embedding": bool(emb)}
+    if ctx.obj["json"]:
+        click.echo(json.dumps(result))
+    elif ctx.obj["quiet"]:
+        click.echo(str(new_id))
+    else:
+        click.echo(f"Merged {len(resolved)} entries → {new_id}")
+        if not emb:
+            click.echo("Warning: embedding generation failed; run "
+                       f"'brain embed {new_id}' later.", err=True)
+
+
 # ── forget ───────────────────────────────────────────────────────────
 
 
