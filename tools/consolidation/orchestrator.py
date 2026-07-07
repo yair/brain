@@ -1,6 +1,14 @@
 #!/usr/bin/env python3
 """Consolidation orchestrator — Yoko proposes, Ringo critiques, DB stores.
 
+FROZEN (2026-07-07): dreaming v1. Superseded by the engine-based flow
+(engine task 2a09b9a3): discovery moved to discover.py, the author
+prompt to author-charter.md, the review prompt to review-rubric-brain.md,
+and the propose/review/adjudicate/apply loop to the engine work system
+(kind: brain-change). Kept runnable for reference; do not build on it.
+The consolidation_proposals / consolidation_log tables it writes are
+historical record only.
+
 Pipeline:
   1. Discover clusters of semantically-similar entries (cosine sim >= --threshold).
   2. Union pair-wise links into connected components.
