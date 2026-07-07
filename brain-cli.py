@@ -1066,6 +1066,57 @@ def supersede(ctx, old_id, title, body, source):
 # ── merge-entries ────────────────────────────────────────────────────
 
 
+def _merge_entries_core(conn, supersede_ids, *, kind, source, title, body,
+                        project, tags, entity_refs, status, confidence):
+    """Shared core of merge-entries and apply-change: resolve + guard the
+    originals, insert the merged entry (with embedding), set superseded_by
+    on all originals, commit. Returns a result dict; exits on guard
+    failure."""
+    resolved = [resolve_uuid_prefix(conn, "entries", s) for s in supersede_ids]
+    if len(set(resolved)) != len(resolved):
+        click.echo("Error: duplicate entries in the supersede list.", err=True)
+        sys.exit(2)
+
+    cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+    # Refuse to merge entries that are already superseded or expired —
+    # a double-merge silently forks history.
+    cur.execute(
+        "SELECT id::text, title, superseded_by::text, expires_at "
+        "FROM entries WHERE id = ANY(%s::uuid[])",
+        [resolved],
+    )
+    for r in cur.fetchall():
+        if r["superseded_by"]:
+            click.echo(f"Error: {r['id'][:8]} ({r['title'][:40]}) is already "
+                       f"superseded by {r['superseded_by'][:8]}.", err=True)
+            sys.exit(1)
+        if r["expires_at"]:
+            click.echo(f"Error: {r['id'][:8]} ({r['title'][:40]}) is "
+                       "soft-deleted (expires_at set).", err=True)
+            sys.exit(1)
+
+    emb = generate_embedding(f"{title} {body}")
+    cur.execute(
+        """
+        INSERT INTO entries (kind, source, title, body, tags, project,
+                             entity_refs, embedding, status, confidence)
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+        RETURNING id
+        """,
+        [kind, source, title, body, tags, project, entity_refs,
+         "[" + ",".join(str(x) for x in emb) + "]" if emb else None,
+         status, confidence],
+    )
+    new_id = cur.fetchone()["id"]
+    cur.execute(
+        "UPDATE entries SET superseded_by = %s WHERE id = ANY(%s::uuid[])",
+        [new_id, resolved],
+    )
+    conn.commit()
+    return {"new_id": str(new_id), "superseded": resolved,
+            "embedding": bool(emb)}
+
+
 @cli.command("merge-entries")
 @click.option("--supersede", "supersede_ids", multiple=True, required=True,
               help="Entry to supersede (UUID or prefix). Repeat per entry; "
@@ -1102,63 +1153,167 @@ def merge_entries(ctx, supersede_ids, kind, title, body, source, project,
         sys.exit(2)
 
     conn = get_conn(ctx.obj["db"])
-    resolved = [resolve_uuid_prefix(conn, "entries", s) for s in supersede_ids]
-    if len(set(resolved)) != len(resolved):
-        click.echo("Error: duplicate entries in --supersede list.", err=True)
-        sys.exit(2)
-
-    cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
-    # Refuse to merge entries that are already superseded or expired —
-    # a double-merge silently forks history.
-    cur.execute(
-        "SELECT id::text, title, superseded_by::text, expires_at "
-        "FROM entries WHERE id = ANY(%s::uuid[])",
-        [resolved],
-    )
-    for r in cur.fetchall():
-        if r["superseded_by"]:
-            click.echo(f"Error: {r['id'][:8]} ({r['title'][:40]}) is already "
-                       f"superseded by {r['superseded_by'][:8]}.", err=True)
-            sys.exit(1)
-        if r["expires_at"]:
-            click.echo(f"Error: {r['id'][:8]} ({r['title'][:40]}) is "
-                       "soft-deleted (expires_at set).", err=True)
-            sys.exit(1)
-
     tag_list = [t.strip() for t in tags.split(",")] if tags else []
     ref_list = [r.strip() for r in entity_refs.split(",")] if entity_refs else []
-    emb = generate_embedding(f"{title} {body}")
-
-    cur.execute(
-        """
-        INSERT INTO entries (kind, source, title, body, tags, project,
-                             entity_refs, embedding, status, confidence)
-        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-        RETURNING id
-        """,
-        [kind, source, title, body, tag_list, project, ref_list,
-         "[" + ",".join(str(x) for x in emb) + "]" if emb else None,
-         status, confidence],
+    result = _merge_entries_core(
+        conn, supersede_ids,
+        kind=kind, source=source, title=title, body=body, project=project,
+        tags=tag_list, entity_refs=ref_list, status=status,
+        confidence=confidence,
     )
-    new_id = cur.fetchone()["id"]
-    cur.execute(
-        "UPDATE entries SET superseded_by = %s WHERE id = ANY(%s::uuid[])",
-        [new_id, resolved],
-    )
-    conn.commit()
     conn.close()
-
-    result = {"new_id": str(new_id), "superseded": resolved,
-              "embedding": bool(emb)}
     if ctx.obj["json"]:
         click.echo(json.dumps(result))
     elif ctx.obj["quiet"]:
-        click.echo(str(new_id))
+        click.echo(result["new_id"])
     else:
-        click.echo(f"Merged {len(resolved)} entries → {new_id}")
-        if not emb:
+        click.echo(f"Merged {len(result['superseded'])} entries → "
+                   f"{result['new_id']}")
+        if not result["embedding"]:
             click.echo("Warning: embedding generation failed; run "
-                       f"'brain embed {new_id}' later.", err=True)
+                       f"'brain embed {result['new_id']}' later.", err=True)
+
+
+# ── apply-change ─────────────────────────────────────────────────────
+
+
+@cli.command("apply-change")
+@click.option("--file", "staging_path", required=True,
+              help="Staging file (brain-change.json), or a staging "
+                   "directory containing one.")
+@click.option("--dry-run", is_flag=True,
+              help="Validate and report without writing.")
+@click.pass_context
+def apply_change(ctx, staging_path, dry_run):
+    """Apply an adjudicated brain-change staging file.
+
+    This is the engine work system's apply handler for kind
+    brain-change (kinds.json in the engine repo runs
+    'brain apply-change --file {staging}' on the brain locus after the
+    human clears the change). Dispatches on the staging JSON's 'action'
+    field; only the three mutating actions are applicable — no-action,
+    flag-contradiction, and defer-to-human never become changes (see
+    tools/consolidation/author-charter.md).
+
+    The staging 'target' field selects the database, overriding --db.
+    Prints one JSON object describing what was applied — the engine
+    records it in the change's event trail.
+    """
+    p = staging_path
+    if os.path.isdir(p):
+        p = os.path.join(p, "brain-change.json")
+    try:
+        with open(p) as fh:
+            staging = json.load(fh)
+    except (OSError, json.JSONDecodeError) as e:
+        click.echo(f"Error: cannot read staging file {p}: {e}", err=True)
+        sys.exit(1)
+
+    action = staging.get("action")
+    db = staging.get("target") or ctx.obj["db"]
+
+    if action == "merge-supersede":
+        new = staging.get("new_entry") or {}
+        missing = [f for f in ("kind", "source", "title", "body")
+                   if not new.get(f)]
+        if missing:
+            click.echo(f"Error: new_entry is missing required fields: "
+                       f"{', '.join(missing)}. Every field must be "
+                       "explicit — absent fields erase information.",
+                       err=True)
+            sys.exit(2)
+        ids = staging.get("supersede_ids") or []
+        if len(ids) < 2:
+            click.echo("Error: merge-supersede needs at least two "
+                       "supersede_ids.", err=True)
+            sys.exit(2)
+        if dry_run:
+            click.echo(json.dumps({"would_apply": action, "db": db,
+                                   "supersede": ids,
+                                   "new_title": new["title"]}))
+            return
+        conn = get_conn(db)
+        result = _merge_entries_core(
+            conn, ids,
+            kind=new["kind"], source=new["source"], title=new["title"],
+            body=new["body"], project=new.get("project"),
+            tags=new.get("tags") or [],
+            entity_refs=new.get("entity_refs") or [],
+            status=new.get("status") or "active",
+            confidence=(new["confidence"]
+                        if new.get("confidence") is not None else 1.0),
+        )
+        conn.close()
+        click.echo(json.dumps({"applied": action, "db": db, **result}))
+
+    elif action == "update-status":
+        entry_id = staging.get("entry_id")
+        new_status = staging.get("new_status")
+        if not entry_id or not new_status:
+            click.echo("Error: update-status needs entry_id and "
+                       "new_status.", err=True)
+            sys.exit(2)
+        if not staging.get("evidence_refs"):
+            click.echo("Error: update-status without evidence_refs is "
+                       "not applicable — the charter requires cited "
+                       "evidence.", err=True)
+            sys.exit(2)
+        if dry_run:
+            click.echo(json.dumps({"would_apply": action, "db": db,
+                                   "entry_id": entry_id,
+                                   "new_status": new_status}))
+            return
+        conn = get_conn(db)
+        entry_id = resolve_uuid_prefix(conn, "entries", entry_id)
+        cur = conn.cursor()
+        cur.execute("UPDATE entries SET status = %s WHERE id = %s",
+                    [new_status, entry_id])
+        conn.commit()
+        conn.close()
+        click.echo(json.dumps({"applied": action, "db": db,
+                               "entry_id": entry_id,
+                               "new_status": new_status,
+                               "evidence_refs": staging["evidence_refs"]}))
+
+    elif action == "fix-metadata":
+        entry_id = staging.get("entry_id")
+        field = staging.get("field")
+        new_value = staging.get("new_value")
+        if field not in ("project", "tags", "source"):
+            click.echo(f"Error: fix-metadata cannot update field "
+                       f"{field!r} (allowed: project, tags, source).",
+                       err=True)
+            sys.exit(2)
+        if not entry_id:
+            click.echo("Error: fix-metadata needs entry_id.", err=True)
+            sys.exit(2)
+        if field == "tags" and not isinstance(new_value, list):
+            click.echo("Error: tags new_value must be a JSON array.",
+                       err=True)
+            sys.exit(2)
+        if dry_run:
+            click.echo(json.dumps({"would_apply": action, "db": db,
+                                   "entry_id": entry_id, "field": field,
+                                   "new_value": new_value}))
+            return
+        conn = get_conn(db)
+        entry_id = resolve_uuid_prefix(conn, "entries", entry_id)
+        cur = conn.cursor()
+        cur.execute(f"UPDATE entries SET {field} = %s WHERE id = %s",
+                    [new_value, entry_id])
+        conn.commit()
+        conn.close()
+        click.echo(json.dumps({"applied": action, "db": db,
+                               "entry_id": entry_id, "field": field,
+                               "new_value": new_value}))
+
+    else:
+        click.echo(f"Error: action {action!r} is not applicable. Only "
+                   "merge-supersede, update-status, and fix-metadata "
+                   "mutate brain; no-action / flag-contradiction / "
+                   "defer-to-human close their task without a change.",
+                   err=True)
+        sys.exit(2)
 
 
 # ── forget ───────────────────────────────────────────────────────────

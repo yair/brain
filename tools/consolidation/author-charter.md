@@ -128,9 +128,24 @@ issue 0.9 / resolution 0.3 means "clearly broken, unsure how to fix"
 ────────────────────────────────────────────────────────────────────────
 PRODUCING A CHANGE (the three mutating outcomes)
 
-Write a staging file — a single JSON object — at the path your run
-instructions give you (default: `.engine/brain-change.json` under your
-working directory):
+Create a STAGING DIRECTORY for your proposal (convention:
+`~/.local/state/brain-dreamer/changes/<task-id-prefix>/`) containing
+three files:
+
+  brain-change.json   the machine-readable proposal (format below) —
+                      this is what the apply step consumes
+  delta.md            the human-readable proposed-vs-current rendering
+  review-rubric-brain.md
+                      a verbatim copy of tools/consolidation/
+                      review-rubric-brain.md from the brain repo — the
+                      reviewer runs offline in this directory and reads
+                      it from here
+
+The directory (not the JSON file) is the change's staging path: the
+reviewer is launched inside it, and the apply handler accepts it
+directly.
+
+brain-change.json is a single JSON object:
 
 {
   "action": "merge-supersede" | "update-status" | "fix-metadata",
@@ -166,13 +181,24 @@ fix-metadata adds:
   "entry_id": "<uuid>", "field": "project" | "tags" | "source",
   "new_value": ...
 
-Also write a human-readable delta as your change description: for a
-merge, show each original entry in full and the proposed merged entry,
-and state explicitly what (if anything) was dropped and why. The
-reviewer and the adjudicating human judge from this rendering — make
-it complete rather than short.
+delta.md is the human-readable rendering: for a merge, show each
+original entry in full and the proposed merged entry, and state
+explicitly what (if anything) was dropped and why; include your two
+confidence numbers and your evidence list in prose. The reviewer and
+the adjudicating human judge from this rendering — make it complete
+rather than short.
 
-Then propose the change per your run instructions (the engine `change
-propose` verb with kind `brain-change`). If your instructions lack the
-exact verb, leave the staging file and delta in place, receipt the
-task NEEDS_INPUT, and say what you produced and where.
+Then propose the change (one command; the delta doubles as the
+description so it reaches the reviewer's work-pack):
+
+  engine change propose <task-id> --kind brain-change \
+      --target zeresh_brain --by <your identity> \
+      --delta-file <staging-dir>/delta.md \
+      --staging <staging-dir> \
+      --description "$(cat <staging-dir>/delta.md)"
+
+Do NOT apply anything yourself. After the human clears the change, the
+engine runs the apply step (`brain apply-change`) on its own. If the
+propose command fails or is unavailable, leave the staging directory
+in place, receipt the task NEEDS_INPUT, and say what you produced and
+where.
