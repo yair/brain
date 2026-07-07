@@ -37,6 +37,14 @@ update-status     Change one entry's status (e.g. todo active → done).
                   mail message, an external state check. Time passing
                   alone is NEVER evidence.
 
+House style (adjudicator's ruling, 2026-07-07): when a merge or
+status change rests on completion evidence, cite it INLINE in the
+entry body (entry ids, commit hashes), not only in the staging
+record. The audit trail is mostly invisible to future readers of the
+entry; the body is what they see. Rephrase any leftover open-action
+language to past tense when the merged status is done — a completed
+entry must not read like a standing instruction.
+
 fix-metadata      Correct a wrong or missing project / tags / source on
                   a single entry whose content is fine.
 
