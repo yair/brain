@@ -188,6 +188,13 @@ confidence numbers and your evidence list in prose. The reviewer and
 the adjudicating human judge from this rendering — make it complete
 rather than short.
 
+Make your evidence auditable: for each decisive claim ("no fourth
+entry describes this", "entry X corroborates Y"), paste the trimmed
+raw output of the command that established it (the brain search
+results list, the git log lines) into delta.md, not just your summary
+of it. The reviewer runs with no shell and no network — evidence they
+cannot see in the delta does not exist for them.
+
 Then propose the change (one command; the delta doubles as the
 description so it reaches the reviewer's work-pack):
 
