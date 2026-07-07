@@ -196,13 +196,17 @@ of it. The reviewer runs with no shell and no network — evidence they
 cannot see in the delta does not exist for them.
 
 Then propose the change (one command; the delta doubles as the
-description so it reaches the reviewer's work-pack):
+description so it reaches the reviewer's work-pack). Both paths MUST
+be ABSOLUTE — the apply step runs later, from a different working
+directory, possibly triggered by a daemon: a relative staging path
+(`.`) is recorded verbatim and can never resolve there. This is not
+hypothetical; it stranded a real change.
 
   engine change propose <task-id> --kind brain-change \
       --target zeresh_brain --by <your identity> \
-      --delta-file <staging-dir>/delta.md \
-      --staging <staging-dir> \
-      --description "$(cat <staging-dir>/delta.md)"
+      --delta-file /absolute/path/to/staging-dir/delta.md \
+      --staging /absolute/path/to/staging-dir \
+      --description "$(cat /absolute/path/to/staging-dir/delta.md)"
 
 Do NOT apply anything yourself. After the human clears the change, the
 engine runs the apply step (`brain apply-change`) on its own. If the
